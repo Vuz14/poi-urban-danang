@@ -1,0 +1,43 @@
+# ==========================================
+# 1. DỮ LIỆU & MODEL (KHÔNG ĐƯỢC ĐẨY LÊN)
+# ==========================================
+dataset/
+data/
+*.csv
+*.xlsx
+*.json
+*.jpg
+*.jpeg
+*.png
+*.h5
+*.pt
+*.pth
+*.bin
+
+# ==========================================
+# 2. CẤU HÌNH & BẢO MẬT (API KEY, PASSWORDS)
+# ==========================================
+.env
+config.yaml
+config.ini
+secrets.json
+*.key
+
+# ==========================================
+# 3. MÔI TRƯỜNG PYTHON CỤC BỘ
+# ==========================================
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ==========================================
+# 4. CÔNG CỤ LẬP TRÌNH (IDE) & HỆ ĐIỀU HÀNH
+# ==========================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.ipynb_checkpoints/
