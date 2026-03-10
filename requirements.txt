@@ -1,19 +1,46 @@
+# ==========================================
+# 1. CORE & DATA PROCESSING (Xử lý dữ liệu cơ bản)
+# ==========================================
 numpy>=1.24.0
+pandas>=2.0.0
 PyYAML>=6.0.1
 tqdm>=4.65.0
 requests>=2.31.0
-pandas>=2.0.0
 
+# ==========================================
+# 2. DEEP LEARNING & AI MODELS (Mô hình Trí tuệ Nhân tạo)
+# ==========================================
 torch>=2.0.0
 torchvision>=0.15.0
-
 transformers>=4.30.0
 openai==0.28.0
 
+# ==========================================
+# 3. GEOSPATIAL & GRAPHS (Xử lý Không gian & Đồ thị)
+# ==========================================
 osmnx>=1.6.0
+networkx>=3.0
 geopandas>=0.13.0
 shapely>=2.0.0
+geopy>=2.4.0
 
+# ==========================================
+# 4. VISUALIZATION & WEB APP (Trực quan hóa & Giao diện)
+# ==========================================
+streamlit>=1.30.0
+folium>=0.14.0
+streamlit-folium>=0.15.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+Pillow>=10.0.0
+
+# ==========================================
+# 5. MACHINE LEARNING (Học máy truyền thống)
+# ==========================================
+scikit-learn>=1.2.0
+
+# ==========================================
+# 6. WEB SCRAPING (Thu thập dữ liệu)
+# ==========================================
 selenium>=4.10.0
 webdriver-manager>=4.0.0
-geopy>=2.4.0
