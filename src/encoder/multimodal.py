@@ -25,7 +25,7 @@ class MultimodalEncoder(nn.Module):
         # Tránh lỗi khi chạy trên GPU
         device = next(self.model.parameters()).device
         
-        inputs = self.processor(text=texts, images=images, return_tensors="pt", padding=True)
+        inputs = self.processor(text=texts, images=images, return_tensors="pt", padding=True, truncation=True, max_length=77)
         inputs = {k: v.to(device) for k, v in inputs.items()}
         
         outputs = self.model(**inputs)

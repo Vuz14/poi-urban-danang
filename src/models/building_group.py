@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from src.encoders.position import DistanceBias
+from src.encoder.position import DistanceBias
 
 class DistanceBiasedSelfAttention(nn.Module):
     def __init__(self, embed_dim, num_heads):
