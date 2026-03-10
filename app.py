@@ -61,8 +61,8 @@ col4.metric("Điểm đánh giá trung bình", f"{filtered_df['Overall Rating'].
 st.markdown("---")
 
 # --- CHIA TAB (THẺ) ĐỂ HIỂN THỊ ---
-tab1, tab2, tab3 = st.tabs(["📍 Bản đồ Không gian Đô thị", "📊 Bảng Dữ liệu Chi tiết", "🧠 Kết quả Trí tuệ Nhân tạo (AI)"])
-
+# --- SỬA LẠI DÒNG NÀY TRONG APP.PY ---
+tab1, tab2, tab3, tab4 = st.tabs(["📍 Bản đồ Đô thị", "📊 Bảng Dữ liệu", "🧠 Phân cụm AI", "🎯 AI Gợi ý Mở Quán (Site Selection)"])
 # TAB 1: BẢN ĐỒ TƯƠNG TÁC
 with tab1:
     st.subheader(f"Bản đồ phân bố {len(filtered_df)} địa điểm tại Đà Nẵng")
@@ -129,5 +129,129 @@ with tab3:
     else:
         st.info("💡 Chưa tìm thấy ảnh t-SNE. Vui lòng chạy lệnh `python main.py` ở Terminal để AI huấn luyện và vẽ ảnh này nhé!")
 
+# ==========================================
+# TAB 4: AI GỢI Ý ĐỊA ĐIỂM (SITE SELECTION)
+# ==========================================
+with tab4:
+    st.subheader("🎯 Trợ lý AI Khảo sát và Gợi ý Địa điểm Kinh doanh")
+    st.markdown("""
+    Chức năng này sử dụng **Mô hình Ngôn ngữ & Thị giác (CLIP)** để phân tích ý tưởng kinh doanh của bạn. 
+    Sau đó, nó tìm kiếm những khu vực tại Đà Nẵng có sự tương đồng cao nhất về mặt văn hóa, không gian và tệp khách hàng để gợi ý bạn đặt mặt bằng.
+    """)
+    
+    col_input1, col_input2 = st.columns([2, 1])
+    
+    with col_input1:
+        # 1. Khách hàng nhập ý tưởng (Text)
+        user_concept = st.text_area(
+            "📝 Nhập ý tưởng quán bạn muốn mở (Ví dụ: Quán cafe lãng mạn, yên tĩnh...):", 
+            value="Quán nhậu vỉa hè, hải sản tươi sống, không gian mở, ồn ào náo nhiệt, giá bình dân",
+            key="user_concept_input",
+            height=130
+        )
+        
+    with col_input2:
+        # 2. Khách hàng tải ảnh lên (Image)
+        uploaded_file = st.file_uploader("🖼️ Tải lên ảnh thiết kế/phong cách quán:", type=['png', 'jpg', 'jpeg'])
+        if uploaded_file is not None:
+            st.image(uploaded_file, caption="Ảnh phong cách tham khảo", use_container_width=True)
+    
+    col_btn, _ = st.columns([1, 2])
+    with col_btn:
+        search_clicked = st.button("🔍 Phân tích & Gợi ý Vị trí")
+        
+    # --- PHẦN 1: NẾU BẤM NÚT -> CHẠY AI VÀ LƯU VÀO BỘ NHỚ ---
+    if search_clicked:
+        with st.spinner("🧠 AI đang phân tích Đa phương thức (Ảnh + Chữ) và quét toàn bộ bản đồ Đà Nẵng..."):
+            try:
+                import os
+                import torch
+                from PIL import Image
+                from torchvision import transforms
+                from src.encoder.multimodal import MultimodalEncoder
+                import torch.nn.functional as F
+                
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                model_path = os.path.abspath(os.path.join(os.getcwd(), "models_saved", "multimodal_best.pth"))
+                
+                if not os.path.exists(model_path):
+                    st.error(f"❌ Khẩn cấp: Không tìm thấy file trọng số AI tại:\n`{model_path}`")
+                    st.stop()
+                
+                # Nạp mô hình AI
+                model = MultimodalEncoder().to(device)
+                model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+                model.eval()
+                
+                transform = transforms.Compose([
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ])
+                
+                if uploaded_file is not None:
+                    img_pil = Image.open(uploaded_file).convert("RGB")
+                    concept_img_tensor = transform(img_pil).unsqueeze(0).to(device)
+                else:
+                    concept_img_tensor = torch.zeros((1, 3, 224, 224), dtype=torch.float32).to(device)
+
+                with torch.no_grad():
+                    concept_feature = model(images=concept_img_tensor, texts=[user_concept]) 
+                
+                all_texts = df['LLM_Input_Text'].tolist()
+                all_poi_features = []
+                batch_size = 32
+                
+                for i in range(0, len(all_texts), batch_size):
+                    batch_texts = all_texts[i:i+batch_size]
+                    dummy_imgs = torch.zeros((len(batch_texts), 3, 224, 224), dtype=torch.float32).to(device)
+                    
+                    with torch.no_grad():
+                        feats = model(images=dummy_imgs, texts=batch_texts)
+                        all_poi_features.append(feats)
+                
+                all_poi_features = torch.cat(all_poi_features, dim=0)
+                similarities = F.cosine_similarity(concept_feature, all_poi_features, dim=-1)
+                
+                # BÍ KÍP: Lưu Top 5 kết quả vào Session State (Bộ nhớ tạm của Web)
+                st.session_state['ai_top_idx'] = torch.topk(similarities, 5).indices.cpu().numpy()
+                st.session_state['ai_top_scores'] = torch.topk(similarities, 5).values.cpu().numpy()
+                
+            except Exception as e:
+                st.error(f"⚠️ Có lỗi xảy ra trong quá trình tính toán AI: {e}")
+
+    # --- PHẦN 2: LẤY TỪ BỘ NHỚ RA ĐỂ VẼ BẢN ĐỒ (Giúp bản đồ không bao giờ bị mất) ---
+    if 'ai_top_idx' in st.session_state:
+        st.success("✅ Đã tìm thấy các khu vực tiềm năng nhất cho ý tưởng của bạn!")
+        
+        top_5_idx = st.session_state['ai_top_idx']
+        top_5_scores = st.session_state['ai_top_scores']
+        
+        m_recommend = folium.Map(location=[16.0544, 108.2022], zoom_start=13, tiles='CartoDB positron')
+        
+        for rank, (idx, score) in enumerate(zip(top_5_idx, top_5_scores)):
+            poi = df.iloc[idx]
+            
+            st.markdown(f"**Top {rank+1}: Khu vực gần `{poi['Restaurant Name']}` (Độ phù hợp: {score*100:.1f}%)**")
+            st.write(f"- 📍 Vị trí: {poi['District']}")
+            st.write(f"- 🔎 Đặc trưng khu vực: {poi['LLM_Input_Text'][:150]}...")
+            
+            folium.Marker(
+                location=[poi['Lat'], poi['Lon']],
+                popup=f"Vị trí đề xuất Top {rank+1}<br>Độ phù hợp: {score*100:.1f}%",
+                icon=folium.Icon(color='red', icon='star')
+            ).add_to(m_recommend)
+            
+            folium.Circle(
+                location=[poi['Lat'], poi['Lon']],
+                radius=500,
+                color='crimson',
+                fill=True,
+                fill_color='crimson',
+                fill_opacity=0.2
+            ).add_to(m_recommend)
+
+        # Trực quan hóa bản đồ
+        st_folium(m_recommend, width="100%", height=500)
 st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>Đồ án Chuyên ngành 1 - Khoa Khoa học Máy tính - ĐH CNTT & TT Việt - Hàn (VKU)</p>", unsafe_allow_html=True)
