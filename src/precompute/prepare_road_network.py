@@ -6,41 +6,52 @@ import networkx as nx
 from tqdm import tqdm
 import os
 
-def compute_street_distances():
-    print("🌍 Bắt đầu tải Bản đồ Giao thông Đà Nẵng từ OpenStreetMap...")
-    # Tải mạng lưới đường đi ô tô/xe máy của Đà Nẵng
-    G = ox.graph_from_place('Da Nang, Vietnam', network_type='drive')
-    print(f"Đã tải xong mạng lưới với {len(G.nodes)} nút giao thông!")
+# 1. CẤU HÌNH ĐƯỜNG DẪN (Đã sửa theo máy của bạn)
+CSV_PATH = r"D:\python\ChuyenDe2\poi-urban-danang\dataset\processed\poi_processed_data.csv"
+OUTPUT_DIR = r"D:\python\ChuyenDe2\poi-urban-danang\dataset\processed"
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "street_dist_matrix.pt")
 
-    df = pd.read_csv("dataset/processed/poi_processed_data.csv")
+def compute_street_distances():
+    # Kiểm tra file đầu vào
+    if not os.path.exists(CSV_PATH):
+        print(f"❌ Lỗi: Không tìm thấy file tại {CSV_PATH}")
+        return
+
+    print("🌍 Bước 2.1: Tải mạng lưới giao thông Đà Nẵng (OSM)...")
+    # Tải đồ thị đường bộ toàn thành phố
+    G = ox.graph_from_place('Da Nang, Vietnam', network_type='drive')
+    
+    print(f"📂 Bước 2.2: Đang đọc dữ liệu từ CSV...")
+    df = pd.read_csv(CSV_PATH)
     n = len(df)
     
-    print("📍 Đang gieo (map) 553 quán ăn vào các con đường gần nhất...")
-    # Tìm node giao thông gần nhất với vĩ độ/kinh độ của từng quán ăn
+    print(f"📍 Bước 2.3: Ánh xạ {n} POIs vào nút giao thông gần nhất...")
+    # Lấy tọa độ Lon/Lat từ file của bạn
     nodes = ox.distance.nearest_nodes(G, X=df['Lon'].values, Y=df['Lat'].values)
     
+    # Khởi tạo ma trận (n x n)
     dist_matrix = np.zeros((n, n))
     
-    print("🚗 Đang tính toán đường đi ngắn nhất giữa tất cả các quán ăn...")
+    print("🚗 Bước 2.4: Tính toán Dijkstra (Shortest Path)...")
+    # Vòng lặp tính toán
     for i in tqdm(range(n)):
-        for j in range(n):
-            if i == j:
-                dist_matrix[i][j] = 0.0
-            elif i < j:
-                try:
-                    # Tính khoảng cách thực tế (theo mét)
-                    l = nx.shortest_path_length(G, nodes[i], nodes[j], weight='length')
-                    dist_matrix[i][j] = l
-                    dist_matrix[j][i] = l
-                except nx.NetworkXNoPath:
-                    # Nếu 2 điểm bị chia cắt (VD: 1 điểm ngoài đảo), phạt khoảng cách lớn
-                    dist_matrix[i][j] = 15000.0 
-                    dist_matrix[j][i] = 15000.0
+        try:
+            # Tính khoảng cách từ nút i đến mọi nút khác có thể đến được
+            lengths = nx.single_source_dijkstra_path_length(G, nodes[i], weight='length')
+            for j in range(n):
+                # Nếu có đường đi thì lấy độ dài (mét), nếu không thì phạt 15km
+                dist_matrix[i][j] = lengths.get(nodes[j], 15000.0)
+        except Exception:
+            dist_matrix[i, :] = 15000.0
 
-    # Lưu ma trận lại để dùng cho file main.py
-    os.makedirs("dataset/processed", exist_ok=True)
-    torch.save(torch.tensor(dist_matrix, dtype=torch.float32), "dataset/processed/street_dist_matrix.pt")
-    print("✅ HOÀN TẤT! Đã lưu ma trận khoảng cách thực tế tại: dataset/processed/street_dist_matrix.pt")
+    print(f"💾 Bước 2.5: Đang lưu ma trận Tensor...")
+    # Chuyển sang PyTorch Tensor và lưu
+    dist_tensor = torch.tensor(dist_matrix, dtype=torch.float32)
+    torch.save(dist_tensor, OUTPUT_FILE)
+    
+    print(f"\n✅ THÀNH CÔNG!")
+    print(f"📍 Ma trận khoảng cách đã lưu tại: {OUTPUT_FILE}")
+    print(f"📊 Kích thước ma trận: {dist_tensor.shape}")
 
 if __name__ == "__main__":
     compute_street_distances()
