@@ -41,3 +41,4 @@ __pycache__/
 Thumbs.db
 .ipynb_checkpoints/
 reports/figures/danang_poi_map.html
+reports/urban_voids_map.html
