@@ -2,7 +2,6 @@
 # 1. DỮ LIỆU & MODEL (KHÔNG ĐƯỢC ĐẨY LÊN)
 # ==========================================
 dataset/
-data/
 *.csv
 *.xlsx
 *.json
