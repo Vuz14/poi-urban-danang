@@ -23,7 +23,7 @@ def haversine_matrix_torch(coords):
     r = 6371000 # Bán kính Trái đất tính bằng mét
     return r * c
 
-def simple_poisson_disk_sampling(width, height, radius=100, k=30):
+def simple_poisson_disk_sampling(width, height, radius=2000, k=30):
     """
     Thuật toán Bridson cho Poisson Disk Sampling 2D cơ bản.
     Tạo các random points điền vào vùng trống.
