@@ -48,9 +48,9 @@ def compute_street_distances():
     torch.save(torch.tensor(dist_matrix), "dataset/processed/street_dist_matrix.pt")
     print("✅ Đã tạo xong file .pt mới tương thích với dữ liệu hiện tại!")
 # Cấu hình đường dẫn
-POI_PATH = r"D:\python\ChuyenDe2\poi-urban-danang\dataset\processed\poi_processed_data.csv"
-VOID_PATH = r"D:\python\ChuyenDe2\poi-urban-danang\dataset\sampling\urban_voids.csv"
-OUTPUT_FILE = r"D:\python\ChuyenDe2\poi-urban-danang\dataset\processed\street_dist_matrix.pt"
+POI_PATH = r"D:\poi_urban\dataset\processed\poi_processed_data.csv"
+VOID_PATH = r"D:\poi_urban\dataset\sampling\urban_voids.csv"
+OUTPUT_FILE = r"D:\poi_urban\dataset\processed\street_dist_matrix.pt"
 
 def compute_street_distances():
     if not os.path.exists(POI_PATH) or not os.path.exists(VOID_PATH):

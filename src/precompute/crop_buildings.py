@@ -6,9 +6,9 @@ import numpy as np
 import os
 from tqdm import tqdm
 
-POI_PATH = r"D:\python\ChuyenDe2\poi-urban-danang\dataset\processed\poi_processed_data.csv"
-VOID_PATH = r"D:\python\ChuyenDe2\poi-urban-danang\dataset\sampling\urban_voids.csv"
-OUTPUT_DIR = r"D:\python\ChuyenDe2\poi-urban-danang\dataset\building_images"
+POI_PATH = r"D:\poi_urban\dataset\processed\poi_processed_data.csv"
+VOID_PATH = r"D:\poi_urban\dataset\sampling\urban_voids.csv"
+OUTPUT_DIR = r"D:\poi_urb\dataset\building_images"
 
 def crop_logic(lat, lon, file_name):
     """Giữ nguyên logic vẽ đa giác cũ của bạn"""
