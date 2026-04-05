@@ -24,6 +24,15 @@ def train_urban_ai():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"⚡ Đang chạy trên: {device.upper()}")
 
+    # Tải Ma trận khoảng cách OSMnx
+    dist_matrix_path = "dataset/processed/street_dist_matrix.pt"
+    if os.path.exists(dist_matrix_path):
+        print("🗺️ Đang tải MA TRẬN KHOẢNG CÁCH GIAO THÔNG (OSMnx Street)...")
+        street_dist_matrix = torch.load(dist_matrix_path).to(device)
+    else:
+        print("⚠️ CẢNH BÁO: Không tìm thấy street_dist_matrix.pt. Vui lòng chạy prepare_road_network.py trước. Tạm dùng Haversine.")
+        street_dist_matrix = None
+
     # 1. Chuẩn bị Dữ liệu
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -67,6 +76,7 @@ def train_urban_ai():
             optimizer.zero_grad() 
 
             coords = batch['coords'].to(device)
+            indices = batch['index']
             images = batch['image'].to(device)
             texts = batch['text']
 
@@ -77,8 +87,14 @@ def train_urban_ai():
             
             # NHÓM 1: LÀM ANCHOR
             anchor_feats = poi_features[:group_size]
-            anchor_coords = coords[:group_size]
-            dist_matrix_anchor = haversine_matrix_torch(anchor_coords)
+            anchor_indices = indices[:group_size]
+            
+            if street_dist_matrix is not None:
+                dist_matrix_anchor = street_dist_matrix[anchor_indices][:, anchor_indices]
+            else:
+                anchor_coords = coords[:group_size]
+                dist_matrix_anchor = haversine_matrix_torch(anchor_coords)
+                
             anchor_seq = anchor_feats.unsqueeze(0)
             anchor_group = group_encoder(anchor_seq, dist_matrix_anchor).mean(dim=1) 
 
@@ -91,8 +107,14 @@ def train_urban_ai():
             neg_groups_list = []
             for i in range(1, 4): # Chạy từ 1 đến 3
                 neg_feats = poi_features[i*group_size : (i+1)*group_size]
-                neg_coords = coords[i*group_size : (i+1)*group_size]
-                dist_neg = haversine_matrix_torch(neg_coords)
+                neg_indices = indices[i*group_size : (i+1)*group_size]
+                
+                if street_dist_matrix is not None:
+                    dist_neg = street_dist_matrix[neg_indices][:, neg_indices]
+                else:
+                    neg_coords = coords[i*group_size : (i+1)*group_size]
+                    dist_neg = haversine_matrix_torch(neg_coords)
+                    
                 neg_seq = neg_feats.unsqueeze(0)
                 neg_group = group_encoder(neg_seq, dist_neg).mean(dim=1)
                 neg_groups_list.append(neg_group)

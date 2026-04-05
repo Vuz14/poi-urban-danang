@@ -1,54 +1,48 @@
-import osmnx as ox
-import matplotlib.pyplot as plt
-from PIL import Image
-import pandas as pd
-import numpy as np
 import os
+import glob
+from PIL import Image
+from torchvision import transforms
 from tqdm import tqdm
 
-POI_PATH = r"D:\poi_urban\dataset\processed\poi_processed_data.csv"
-VOID_PATH = r"D:\poi_urban\dataset\sampling\urban_voids.csv"
-OUTPUT_DIR = r"D:\poi_urb\dataset\building_images"
-
-def crop_logic(lat, lon, file_name):
-    """Giữ nguyên logic vẽ đa giác cũ của bạn"""
-    try:
-        buildings = ox.features_from_point((lat, lon), tags={'building': True}, dist=100)
-        fig, ax = plt.subplots(figsize=(2.24, 2.24), dpi=100)
-        fig.patch.set_facecolor('black')
-        ax.set_facecolor('black')
-        if not buildings.empty:
-            buildings.plot(ax=ax, facecolor='white', edgecolor='none')
-        ax.set_axis_off()
-        plt.subplots_adjust(top=1, bottom=0, right=1, left=0)
-        plt.savefig(file_name, facecolor='black', pad_inches=0)
-        plt.close(fig)
-        Image.open(file_name).convert('RGB').resize((224, 224)).save(file_name)
-    except Exception:
-        Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8)).save(file_name)
-        plt.close()
-
-def run_sync_cropping():
-    if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
-    plt.ioff()
-
-    # Bước 3.1: Cắt ảnh cho POI (Tên file: building_ID.png)
-    df_poi = pd.read_csv(POI_PATH)
-    print("🏢 Đang cắt ảnh cho các quán ăn...")
-    for _, row in tqdm(df_poi.iterrows(), total=len(df_poi)):
-        fname = os.path.join(OUTPUT_DIR, f"building_{row['RestaurantID']}.png")
-        if not os.path.exists(fname):
-            crop_logic(row['Lat'], row['Lon'], fname)
-
-    # Bước 3.2: Cắt ảnh cho Vùng trống (Tên file: void_INDEX.png)
-    df_void = pd.read_csv(VOID_PATH)
-    print("🌌 Đang cắt ảnh cho các vùng trống đô thị...")
-    for idx, row in tqdm(df_void.iterrows(), total=len(df_void)):
-        fname = os.path.join(OUTPUT_DIR, f"void_{idx}.png")
-        if not os.path.exists(fname):
-            crop_logic(row['Lat'], row['Lon'], fname)
-
-    print(f"✅ Hoàn tất! Ảnh POI và Voids đã nằm chung tại: {OUTPUT_DIR}")
+def crop_and_resize_buildings():
+    input_dir = "dataset/building_images"
+    output_dir = "dataset/building_images_224"
+    
+    if not os.path.exists(input_dir):
+        print(f"❌ Không tìm thấy thư mục {input_dir}")
+        return
+        
+    os.makedirs(output_dir, exist_ok=True)
+    
+    image_paths = glob.glob(os.path.join(input_dir, "*.png"))
+    image_paths.extend(glob.glob(os.path.join(input_dir, "*.jpg")))
+    
+    print(f"📦 Đã tìm thấy {len(image_paths)} ảnh tòa nhà. Bắt đầu xử lý...")
+    
+    # Transform pipeline: Resize cạnh nhỏ nhất về 224, sau đó cắt phần trung tâm 224x224
+    transform = transforms.Compose([
+        transforms.Resize(224),
+        transforms.CenterCrop(224)
+    ])
+    
+    success = 0
+    failed = 0
+    for img_path in tqdm(image_paths):
+        filename = os.path.basename(img_path)
+        out_path = os.path.join(output_dir, filename)
+        
+        try:
+            with Image.open(img_path) as img:
+                img = img.convert('RGB')
+                out_img = transform(img)
+                out_img.save(out_path, quality=95)
+                success += 1
+        except Exception as e:
+            print(f"⚠️ Lỗi xử lý {filename}: {e}")
+            failed += 1
+            
+    print(f"✅ Xong! Thành công: {success}, Lỗi: {failed}")
+    print(f"📁 Toàn bộ ảnh chuẩn (224x224) được lưu tại: {output_dir}")
 
 if __name__ == "__main__":
-    run_sync_cropping()
+    crop_and_resize_buildings()

@@ -50,6 +50,7 @@ class POIDataset(Dataset):
 
         # Trả về 1 Dictionary chứa Đầy đủ thông tin của 1 POI
         return {
+            'index': idx,
             'poi_id': self.data.iloc[idx]['RestaurantID'],
             'district': self.data.iloc[idx]['District'],
             'coords': coords,
