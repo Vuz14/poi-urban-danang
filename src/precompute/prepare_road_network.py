@@ -6,52 +6,46 @@ import networkx as nx
 from tqdm import tqdm
 import os
 
-# 1. CẤU HÌNH ĐƯỜNG DẪN (Đã sửa theo máy của bạn)
-CSV_PATH = r"D:\python\ChuyenDe2\poi-urban-danang\dataset\processed\poi_processed_data.csv"
-OUTPUT_DIR = r"D:\python\ChuyenDe2\poi-urban-danang\dataset\processed"
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "street_dist_matrix.pt")
+# Cấu hình đường dẫn
+POI_PATH = r"D:\poi-urban-danang\dataset\processed\poi_processed_data.csv"
+VOID_PATH = r"D:\poi-urban-danang\dataset\sampling\urban_voids.csv"
+OUTPUT_FILE = r"D:\poi-urban-danang\dataset\processed\street_dist_matrix.pt"
 
 def compute_street_distances():
-    # Kiểm tra file đầu vào
-    if not os.path.exists(CSV_PATH):
-        print(f"❌ Lỗi: Không tìm thấy file tại {CSV_PATH}")
+    if not os.path.exists(POI_PATH) or not os.path.exists(VOID_PATH):
+        print("❌ Lỗi: Thiếu file POI hoặc file Urban Voids. Hãy chạy pds_sampler.py trước!")
         return
 
-    print("🌍 Bước 2.1: Tải mạng lưới giao thông Đà Nẵng (OSM)...")
-    # Tải đồ thị đường bộ toàn thành phố
+    print("🌍 Tải mạng lưới giao thông Đà Nẵng...")
     G = ox.graph_from_place('Da Nang, Vietnam', network_type='drive')
     
-    print(f"📂 Bước 2.2: Đang đọc dữ liệu từ CSV...")
-    df = pd.read_csv(CSV_PATH)
-    n = len(df)
+    # 1. Gộp tọa độ của cả POI và Voids lại thành một danh sách duy nhất
+    df_poi = pd.read_csv(POI_PATH)
+    df_void = pd.read_csv(VOID_PATH)
     
-    print(f"📍 Bước 2.3: Ánh xạ {n} POIs vào nút giao thông gần nhất...")
-    # Lấy tọa độ Lon/Lat từ file của bạn
-    nodes = ox.distance.nearest_nodes(G, X=df['Lon'].values, Y=df['Lat'].values)
+    # Kết hợp tọa độ: POI sẽ nằm từ index 0 đến 552, sau đó là các điểm Voids
+    combined_lats = list(df_poi['Lat']) + list(df_void['Lat'])
+    combined_lons = list(df_poi['Lon']) + list(df_void['Lon'])
+    n_total = len(combined_lats)
     
-    # Khởi tạo ma trận (n x n)
-    dist_matrix = np.zeros((n, n))
+    print(f"📍 Tổng cộng: {len(df_poi)} POIs + {len(df_void)} Voids = {n_total} điểm.")
     
-    print("🚗 Bước 2.4: Tính toán Dijkstra (Shortest Path)...")
-    # Vòng lặp tính toán
-    for i in tqdm(range(n)):
+    print("📍 Ánh xạ tất cả các điểm vào nút giao thông...")
+    nodes = ox.distance.nearest_nodes(G, X=combined_lons, Y=combined_lats)
+    
+    dist_matrix = np.zeros((n_total, n_total))
+    
+    print("🚗 Tính toán Dijkstra cho ma trận tổng hợp...")
+    for i in tqdm(range(n_total)):
         try:
-            # Tính khoảng cách từ nút i đến mọi nút khác có thể đến được
             lengths = nx.single_source_dijkstra_path_length(G, nodes[i], weight='length')
-            for j in range(n):
-                # Nếu có đường đi thì lấy độ dài (mét), nếu không thì phạt 15km
+            for j in range(n_total):
                 dist_matrix[i][j] = lengths.get(nodes[j], 15000.0)
         except Exception:
             dist_matrix[i, :] = 15000.0
 
-    print(f"💾 Bước 2.5: Đang lưu ma trận Tensor...")
-    # Chuyển sang PyTorch Tensor và lưu
-    dist_tensor = torch.tensor(dist_matrix, dtype=torch.float32)
-    torch.save(dist_tensor, OUTPUT_FILE)
-    
-    print(f"\n✅ THÀNH CÔNG!")
-    print(f"📍 Ma trận khoảng cách đã lưu tại: {OUTPUT_FILE}")
-    print(f"📊 Kích thước ma trận: {dist_tensor.shape}")
+    torch.save(torch.tensor(dist_matrix, dtype=torch.float32), OUTPUT_FILE)
+    print(f"✅ Đã lưu ma trận tổng hợp tại: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     compute_street_distances()

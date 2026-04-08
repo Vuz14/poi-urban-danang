@@ -11,8 +11,8 @@ import numpy as np
 
 # Import các file từ hệ thống của bạn
 from src.data.dataset import POIDataset
-from src.encoder.multimodal import MultimodalEncoder  # Căn chỉnh theo máy bạn
-from utlis.geo_utils import haversine_matrix_torch # Căn chỉnh theo máy bạn
+from src.encoder.multimodal_encoder import MultimodalEncoder  
+from utlis.geo_utils import haversine_matrix_torch 
 from src.models.building_group import BuildingGroupEncoder
 from src.models.loss_functions import InfoNCELoss
 
@@ -71,7 +71,7 @@ def train_urban_ai():
             texts = batch['text']
 
             poi_features = multimodal_encoder(images=images, texts=texts)
-
+            
             # BÍ KÍP 2: CHIA BATCH THÀNH 4 NHÓM (Mỗi nhóm 8 POI)
             group_size = 8
             

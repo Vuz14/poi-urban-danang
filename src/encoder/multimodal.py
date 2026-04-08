@@ -1,7 +1,10 @@
+import os
+
 import torch
 import torch.nn as nn
 from transformers import CLIPProcessor, CLIPModel
 import yaml
+from torchvision import models
 
 class MultimodalEncoder(nn.Module):
     def __init__(self):
