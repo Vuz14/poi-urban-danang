@@ -14,6 +14,7 @@ torch>=2.0.0
 torchvision>=0.15.0
 transformers>=4.30.0
 openai==0.28.0
+sentence-transformers>=2.2.2
 
 # ==========================================
 # 3. GEOSPATIAL & GRAPHS (Xử lý Không gian & Đồ thị)
@@ -38,6 +39,7 @@ Pillow>=10.0.0
 # 5. MACHINE LEARNING (Học máy truyền thống)
 # ==========================================
 scikit-learn>=1.2.0
+umap-learn>=0.5.3
 
 # ==========================================
 # 6. WEB SCRAPING (Thu thập dữ liệu)
