@@ -32,36 +32,37 @@ Tập kiểm thử (Foody): dataset/processed/poi_processed_foody.csv
 1. Chuẩn bị Dữ liệu (Data Preprocessing)
 Gộp và Chuẩn hóa Dữ liệu (Data Merging): Bước đầu tiên bắt buộc phải chạy để gộp 2 file thô (poi_data_foody.csv và poi_data_ggmap.csv) thành một file duy nhất đồng bộ các cột. Sau đó tiến hành tính toán không gian và thu thập hình dáng đa giác tòa nhà từ tọa độ 553 POI.
 
-Bash
+ 
 python dataset/processed/prepare_data.py
 python src/precompute/pds_sampler.py
 python src/precompute/prepare_road_network.py
+python src/data/get_building_footprints.py
 python src/precompute/crop_buildings.py
 2. Phân tích Dịch chuyển Miền (Domain Shift Analysis)
 Đo lường sự khác biệt phân phối (Rating, Price) giữa Google Maps và Foody bằng KL Divergence & Wasserstein.
 
-Bash
+ 
 python research_pipeline/domain_analysis.py
 3. Huấn luyện AI (Model Training)
 Huấn luyện Multimodal Encoder & Distance-Biased Transformer trên dữ liệu Google Maps.
 
-Bash
+ 
 python main.py
 4. Kiểm thử Chéo (Zero-shot Inference)
 Đóng băng trọng số (Freeze Model) và trích xuất embedding cho cả 2 tập dữ liệu.
 
-Bash
+ 
 python research_pipeline/freeze_model.py
 5. Đánh giá & Trực quan hóa (Evaluation & Visualization)
 Tính toán các độ đo phân cụm (Silhouette, Davies-Bouldin) và vẽ bản đồ t-SNE, UMAP không gian ngữ nghĩa chéo.
 
-Bash
+ 
 python research_pipeline/evaluation.py
 python research_pipeline/visualization.py
 6. Xuất Báo Cáo Tự động (Auto-Conclusion)
 Tổng hợp metrics thành bảng .csv và xuất file text đánh giá mô hình có bị Overfitting hay không.
 
-Bash
+ 
 python research_pipeline/generate_report.py
 🌐 Triển khai Web (Production Readiness)
 Toàn bộ biểu đồ (reports/figures/), bảng số liệu (reports/tables/) và trọng số AI (models_saved/multimodal_best.pth) đã sẵn sàng để tích hợp vào hệ thống Web phân tích (Frontend Next.js & Backend FastAPI).
