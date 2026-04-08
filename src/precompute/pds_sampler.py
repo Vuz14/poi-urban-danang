@@ -137,11 +137,16 @@ def visualize_pds_map(df_poi, df_neg, map_path="reports/urban_voids_map.html"):
     print(f"✅ Bản đồ đã lưu tại: {map_path}")
 
 if __name__ == "__main__":
-    poi_file = "dataset/processed/poi_processed_data.csv"
-    output_file = "dataset/sampling/urban_voids.csv"
+    datasets = [
+        ("dataset/processed/poi_processed_gmap.csv", "dataset/sampling/urban_voids_gmap.csv"),
+        ("dataset/processed/poi_processed_foody.csv", "dataset/sampling/urban_voids_foody.csv")
+    ]
     
-    if os.path.exists(poi_file):
-        df_p, df_n = generate_urban_negatives(poi_file, output_file)
-        visualize_pds_map(df_p, df_n)
-    else:
-        print(f"❌ Không tìm thấy file {poi_file}")
+    for poi_file, output_file in datasets:
+        print(f"\n--- 🔄 XỬ LÝ LẤY MẪU CHO: {poi_file} ---")
+        if os.path.exists(poi_file):
+            df_p, df_n = generate_urban_negatives(poi_file, output_file)
+            map_name = output_file.replace('.csv', '_map.html').replace('sampling', 'reports')
+            visualize_pds_map(df_p, df_n, map_path=map_name)
+        else:
+            print(f"❌ Không tìm thấy file {poi_file}")
