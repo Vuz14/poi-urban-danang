@@ -5,6 +5,28 @@ import os
 import math
 from shapely.geometry import Point, MultiPoint
 from shapely.ops import nearest_points
+from tqdm import tqdm
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+DATASETS = [
+    {
+        "name": "Foody POI",
+        "csv_path": os.path.join(PROJECT_ROOT, "dataset/processed/poi_processed_data.csv"),
+        "lat_col": "Lat",
+        "lon_col": "Lon",
+        "id_col": "RestaurantID",
+        "source": "foody"
+    },
+    {
+        "name": "Google Maps POI",
+        "csv_path": os.path.join(PROJECT_ROOT, "dataset/processed/poi_data_ggmap.csv"),
+        "lat_col": "lat",
+        "lon_col": "lng",
+        "id_col": "place_id",
+        "source": "google_maps"
+    }
+]
 
 def bridson_pds(width, height, r, k=30):
     """
@@ -62,14 +84,58 @@ def bridson_pds(width, height, r, k=30):
             
     return np.array(points)
 
-def generate_urban_negatives(poi_csv, output_csv, min_dist_m=200):
-    """
-    Tạo các điểm 'Negative samples' bằng PDS tránh các POI hiện có.
-    min_dist_m: Khoảng cách tối thiểu giữa các điểm PDS (mét).
-    """
-    print("📍 Đang đọc dữ liệu POI hiện có...")
-    df_poi = pd.read_csv(poi_csv)
+def load_and_merge_datasets():
+    combined_records = []
+    print("📍 Đang đọc và hợp nhất các datasets POI...")
     
+    for ds in DATASETS:
+        if not os.path.exists(ds['csv_path']):
+            print(f"⚠️ Không tìm thấy file: {ds['csv_path']}")
+            continue
+            
+        df = pd.read_csv(ds['csv_path'])
+        print(f"   - {ds['name']}: {len(df)} điểm.")
+        for idx, row in df.iterrows():
+            lat = row.get(ds['lat_col'])
+            lon = row.get(ds['lon_col'])
+            
+            if pd.isna(lat) or pd.isna(lon):
+                continue
+                
+            item_id = row.get(ds['id_col'], idx)
+            clean_id = str(item_id).replace(':', '_')
+            
+            combined_records.append({
+                'Global_ID': f"{ds['source']}_{clean_id}",
+                'Lat': float(lat),
+                'Lon': float(lon),
+                'Source': ds['source']
+            })
+            
+    df_combined = pd.DataFrame(combined_records)
+    print(f"✅ Tổng cộng thu được {len(df_combined)} điểm dữ liệu thực tế.")
+    return df_combined
+
+def generate_urban_negatives(df_poi, output_csv, master_csv, min_dist_m=200):
+    """
+    Tạo các điểm 'Negative samples' bằng PDS tránh TẤT CẢ POI hiện có.
+    """
+    print(f"🧹 Đang dọn dẹp tọa độ rác trước khi lấy mẫu...")
+    initial_len = len(df_poi)
+    
+    # Khóa cứng Bounding Box khu vực đô thị Đà Nẵng
+    # (Loại bỏ các điểm có tọa độ 0,0 hoặc nằm ở tỉnh/quốc gia khác)
+    dn_min_lat, dn_max_lat = 15.90, 16.20
+    dn_min_lon, dn_max_lon = 108.00, 108.35
+    
+    df_poi = df_poi[
+        (df_poi['Lat'] >= dn_min_lat) & (df_poi['Lat'] <= dn_max_lat) &
+        (df_poi['Lon'] >= dn_min_lon) & (df_poi['Lon'] <= dn_max_lon)
+    ].reset_index(drop=True)
+    
+    if len(df_poi) < initial_len:
+        print(f"⚠️ Đã loại bỏ {initial_len - len(df_poi)} điểm POI có tọa độ rác (nằm ngoài Đà Nẵng).")
+        
     min_lat, max_lat = df_poi['Lat'].min(), df_poi['Lat'].max()
     min_lon, max_lon = df_poi['Lon'].min(), df_poi['Lon'].max()
     
@@ -86,40 +152,59 @@ def generate_urban_negatives(poi_csv, output_csv, min_dist_m=200):
     pds_lons = raw_points[:, 0] + min_lon
     pds_lats = raw_points[:, 1] + min_lat
     
-    print("🧹 Đang lọc các điểm nằm trong vùng đô thị hiện hữu...")
+    print("🧹 Đang lọc các điểm nằm trong vùng đô thị hiện hữu (né chùm POI)...")
     poi_points = MultiPoint([Point(lon, lat) for lon, lat in zip(df_poi['Lon'], df_poi['Lat'])])
     
     filtered_points = []
     exclusion_radius = 100 / 111000.0 
     
-    for lon, lat in zip(pds_lons, pds_lats):
+    for lon, lat in tqdm(zip(pds_lons, pds_lats), total=len(pds_lons)):
         p = Point(lon, lat)
         nearest_poi = nearest_points(p, poi_points)[1]
         if p.distance(nearest_poi) > exclusion_radius:
             filtered_points.append([lat, lon])
             
     df_neg = pd.DataFrame(filtered_points, columns=['Lat', 'Lon'])
-    df_neg['Category'] = 'Empty_Space'
-    df_neg['Name'] = 'Urban_Void'
+    
+    # [FIX] Lấy số lượng điểm gấp 5 lần số POI thay vì 1:1
+    max_voids = len(df_poi) * 5 
+    
+    if len(df_neg) > max_voids:
+        print(f"\n⚠️ Phát hiện {len(df_neg)} điểm Voids!")
+        print(f"👉 Đang lấy mẫu ngẫu nhiên giảm xuống còn {max_voids} điểm (Tỉ lệ 1:5 với POI)...")
+        df_neg = df_neg.sample(n=max_voids, random_state=42).reset_index(drop=True)
+    else:
+        print(f"\n✅ Đã sinh được {len(df_neg)} điểm Voids hợp lệ.")
+        
+    df_neg['Global_ID'] = [f"void_{i}" for i in range(len(df_neg))]
+    df_neg['Source'] = 'urban_voids'
     
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+    # Lưu file urban_voids gốc
     df_neg.to_csv(output_csv, index=False)
     print(f"✅ Đã tạo {len(df_neg)} điểm vùng trống. Lưu tại: {output_csv}")
     
-    return df_poi, df_neg
+    # Nối thành siêu dải Master Nodes
+    os.makedirs(os.path.dirname(master_csv), exist_ok=True)
+    df_master = pd.concat([df_poi, df_neg], ignore_index=True)
+    df_master.to_csv(master_csv, index=False)
+    print(f"🌟 Đã xuất tệp tọa độ siêu vũ trụ: {master_csv} (Tổng {len(df_master)} dòng)")
+    
+    return df_neg, df_master
 
-def visualize_pds_map(df_poi, df_neg, map_path="reports/urban_voids_map.html"):
-    print("🗺️ Đang vẽ bản đồ kiểm tra...")
+def visualize_pds_map(df_poi, df_neg, map_path):
+    print("🗺️ Đang vẽ bản đồ kiểm tra không gian...")
     m = folium.Map(location=[df_poi['Lat'].mean(), df_poi['Lon'].mean()], zoom_start=13)
     
     for _, row in df_poi.iterrows():
+        color = 'blue' if row['Source'] == 'foody' else 'green'
         folium.CircleMarker(
             location=[row['Lat'], row['Lon']],
             radius=2,
-            color='blue',
+            color=color,
             fill=True,
             fill_opacity=0.5,
-            popup="POI Hiện hữu"
+            popup=f"POI: {row['Source']}"
         ).add_to(m)
         
     for _, row in df_neg.iterrows():
@@ -134,19 +219,17 @@ def visualize_pds_map(df_poi, df_neg, map_path="reports/urban_voids_map.html"):
         
     os.makedirs(os.path.dirname(map_path), exist_ok=True)
     m.save(map_path)
-    print(f"✅ Bản đồ đã lưu tại: {map_path}")
+    print(f"✅ Bản đồ HTML đã lưu tại: {map_path}")
 
 if __name__ == "__main__":
-    datasets = [
-        ("dataset/processed/poi_processed_gmap.csv", "dataset/sampling/urban_voids_gmap.csv"),
-        ("dataset/processed/poi_processed_foody.csv", "dataset/sampling/urban_voids_foody.csv")
-    ]
+    output_voids = os.path.join(PROJECT_ROOT, "dataset/sampling/urban_voids.csv")
+    output_master = os.path.join(PROJECT_ROOT, "dataset/processed/master_nodes.csv")
+    map_html = os.path.join(PROJECT_ROOT, "reports/urban_voids_map.html")
     
-    for poi_file, output_file in datasets:
-        print(f"\n--- 🔄 XỬ LÝ LẤY MẪU CHO: {poi_file} ---")
-        if os.path.exists(poi_file):
-            df_p, df_n = generate_urban_negatives(poi_file, output_file)
-            map_name = output_file.replace('.csv', '_map.html').replace('sampling', 'reports')
-            visualize_pds_map(df_p, df_n, map_path=map_name)
-        else:
-            print(f"❌ Không tìm thấy file {poi_file}")
+    df_poi_combined = load_and_merge_datasets()
+    if len(df_poi_combined) > 0:
+        # Sử dụng min_dist_m=55 để đảm bảo sinh ra đủ nhiều điểm trước khi bị cắt giảm (sample)
+        df_negative, df_master = generate_urban_negatives(df_poi_combined, output_voids, output_master, min_dist_m=55)
+        visualize_pds_map(df_poi_combined, df_negative, map_html)
+    else:
+        print("❌ Không có dữ liệu POI để rải điểm.")
