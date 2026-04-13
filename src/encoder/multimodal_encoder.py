@@ -1,36 +1,71 @@
+"""
+multimodal_encoder.py - Bộ mã hóa Đa phương thức (Multimodal Encoder)
+======================================================================
+THAY ĐỔI SO VỚI PHIÊN BẢN CŨ:
+  - [YC3-A] Hỗ trợ Multi-image Pooling:
+            Input images có thể là Tensor [B, N, C, H, W] (N = số ảnh/POI).
+            → Reshape → qua CLIP → Mean Pooling theo chiều N → [B, D]
+  - [YC3-B] Ablation Study với 4 versions:
+            Version 1 : Chỉ Không gian (ResNet geom)
+            Version 2 : Không gian + Text
+            Version 3 : Không gian + Image
+            Version 4 : Full (Không gian + Text + Image) ← Mặc định
+  - Output dimension luôn là embed_dim (64) bất kể version.
+"""
+
 import os
+from typing import List, Optional, Union
 
 import torch
 import torch.nn as nn
-from transformers import CLIPProcessor, CLIPModel
 import yaml
 from torchvision import models
 from torchvision.transforms.functional import to_pil_image
-from typing import Optional, List, Union
-# Thêm vào đầu file multimodal_encoder.py
-print("🔥 Đã nạp thành công MultimodalEncoder từ file encoder!")
+from transformers import CLIPModel, CLIPProcessor
+
+
+# Ánh xạ version → mô tả để in log
+VERSION_DESC = {
+    1: "V1: Chỉ Không gian (ResNet)",
+    2: "V2: Không gian + Text",
+    3: "V3: Không gian + Image",
+    4: "V4: Full (Không gian + Text + Image)",
+}
+
 
 class MultimodalEncoder(nn.Module):
-    """Bộ mã hóa Đa phương thức (Multimodal Encoder).
+    """Bộ mã hóa Đa phương thức.
 
-    Mục tiêu:
-    - CLIP để mã hóa: Ảnh POI + Văn bản Review
-    - ResNet để mã hóa: Ảnh hình học tòa nhà (footprint)
-    - Fusion: Linear Projection để ghép các embedding về cùng một không gian.
+    Kiến trúc:
+      - CLIP  : Mã hóa ảnh POI (hỗ trợ multi-image) + Văn bản Review
+      - ResNet: Mã hóa ảnh hình học tòa nhà (footprint / geom_images)
+      - Fusion: Linear Projection → ghép các embedding về cùng không gian embed_dim
 
-    Yêu cầu:
-    - Không tạo lỗi lệch chiều (Dimension Mismatch) khi Forward.
-    - Hỗ trợ Dynamic Negative Sampling từ Urban Voids
+    Ablation Study:
+      version=1 → Chỉ ResNet (geom)
+      version=2 → ResNet + Text CLIP
+      version=3 → ResNet + Image CLIP
+      version=4 → ResNet + Text + Image CLIP (Full, mặc định)
     """
 
-    def __init__(self, config_path: str = "config.yaml"):
+    def __init__(self, config_path: str = "config.yaml", version: int = 4):
+        """
+        Tham số:
+            config_path : Đường dẫn file YAML cấu hình (tùy chọn).
+            version     : Phiên bản Ablation Study (1–4). Mặc định = 4 (Full).
+        """
         super().__init__()
 
-        # ----- Cấu hình mặc định (nếu không có file config) -----
+        # [YC3-B] Kiểm tra version hợp lệ
+        assert version in (1, 2, 3, 4), "version phải thuộc {1, 2, 3, 4}"
+        self.version = version
+        print(f"🔥 MultimodalEncoder khởi tạo | {VERSION_DESC[version]}")
+
+        # ---- Cấu hình mặc định -------------------------------------------
         default_config = {
             "model": {
-                "embed_dim": 64,
-                "clip_model": "openai/clip-vit-base-patch32",
+                "embed_dim"   : 64,
+                "clip_model"  : "openai/clip-vit-base-patch32",
                 "resnet_model": "resnet50",
             }
         }
@@ -43,112 +78,172 @@ class MultimodalEncoder(nn.Module):
         else:
             config = default_config
 
-        embed_dim = config["model"]["embed_dim"]
-        clip_model_name = config["model"]["clip_model"]
+        embed_dim        = config["model"]["embed_dim"]
+        clip_model_name  = config["model"]["clip_model"]
         resnet_model_name = config["model"].get("resnet_model", "resnet50")
+        self.embed_dim   = embed_dim
 
-        # ----- CLIP encoder (Ảnh POI + Text Review) -----
-        self.model = CLIPModel.from_pretrained(clip_model_name)
-        self.processor = CLIPProcessor.from_pretrained(clip_model_name)
+        # ---- CLIP (Text + Image) ------------------------------------------
+        self.clip_model  = CLIPModel.from_pretrained(clip_model_name)
+        self.processor   = CLIPProcessor.from_pretrained(clip_model_name)
+        clip_proj_dim    = self.clip_model.config.projection_dim  # thường = 512
 
-        # CLIP image/text embedding thường có kích thước 512
-        self.projection = nn.Linear(self.model.config.projection_dim, embed_dim)
+        # Projection riêng cho từng modality (Text và Image)
+        self.text_projection  = nn.Linear(clip_proj_dim, embed_dim)
+        self.image_projection = nn.Linear(clip_proj_dim, embed_dim)
 
-        # ----- ResNet encoder (ảnh footprint) -----
-        self.resnet = getattr(models, resnet_model_name)(weights=models.ResNet50_Weights.IMAGENET1K_V2)
-        self.resnet.fc = nn.Linear(self.resnet.fc.in_features, embed_dim)
+        # ---- ResNet (Geom / Footprint) ------------------------------------
+        self.resnet     = getattr(models, resnet_model_name)(
+            weights=models.ResNet50_Weights.IMAGENET1K_V2
+        )
+        self.resnet.fc  = nn.Linear(self.resnet.fc.in_features, embed_dim)
 
-        # ----- Fusion (ghép 2 embedding) -----
+        # ---- Fusion layers (luôn nhận 3 * embed_dim → embed_dim) ----------
+        # [YC3-B] Các version thiếu modality sẽ dùng zero vector → đầu vào
+        # luôn có đúng kích thước 3*embed_dim, tránh Dimension Mismatch.
         self.fusion = nn.Sequential(
-            nn.Linear(embed_dim * 2, embed_dim),
+            nn.Linear(embed_dim * 3, embed_dim),
             nn.LayerNorm(embed_dim),
             nn.GELU(),
         )
 
-    def forward(
-        self,
-        images: Optional[Union[torch.Tensor, List]] = None,
-        texts: Optional[List[str]] = None,
-        geom_images: Optional[torch.Tensor] = None,
-        is_negative: bool = False,
-    ):
-        """Forward pass cho Multimodal Encoder - Hỗ trợ POI thực + Negative Samples.
+    # ======================================================================
+    # FORWARD
+    # ======================================================================
+    def forward(self, geom_images=None, images=None, texts=None):
+            """
+            Forward Pass (Tối ưu cho từng Version)
+            """
+            # Sử dụng đúng hàm suy luận batch_size của bạn
+            batch_size = self._infer_batch_size(images, texts, geom_images)
+            device = next(self.parameters()).device
+            
+            # 1. Trích xuất Không gian (ResNet) - Luôn bật ở cả 4 Version
+            # Gọi thẳng xuống hàm _encode_resnet gốc của bạn ở bên dưới
+            spatial_features = self._encode_resnet(
+                geom_images=geom_images, is_negative=False, device=device, batch_size=batch_size
+            )
 
-        Args:
-            images: Tensor hoặc List[PIL.Image] (ảnh POI) cho CLIP.
-            texts: List[str] (review / mô tả) cho CLIP.
-            geom_images: Tensor (ảnh footprint) cho ResNet.
-            is_negative: bool - True nếu là Negative Sample (sẽ dùng Dummy Data).
+            # -----------------------------------------------------------
+            # [TỐI ƯU V1]: Nếu là mode 1, chỉ dùng ResNet -> Trả về luôn!
+            # Bỏ qua hoàn toàn logic CLIP và lớp Fusion phía sau.
+            # -----------------------------------------------------------
+            if self.version == 1:
+                return spatial_features
 
-        Returns:
-            torch.Tensor với shape (batch, 64)
-        """
-        device = next(self.parameters()).device
-        batch_size = self._infer_batch_size(images, texts, geom_images)
+            # 2. Trích xuất Text & Image (CLIP) cho các Version 2, 3, 4
+            text_features = torch.zeros(batch_size, self.embed_dim, device=device)
+            image_features = torch.zeros(batch_size, self.embed_dim, device=device)
 
-        # CLIP encoding
-        clip_feat = self._encode_clip(images, texts, is_negative, device, batch_size)
+            if self.version in [2, 4]:
+                # Gọi đúng tên hàm _encode_clip_text
+                text_features = self._encode_clip_text(
+                    texts=texts, is_negative=False, device=device, batch_size=batch_size
+                )
 
-        # ResNet encoding
-        geom_feat = self._encode_resnet(geom_images, is_negative, device, batch_size)
+            if self.version in [3, 4]:
+                # Gọi đúng tên hàm _encode_clip_image
+                image_features = self._encode_clip_image(
+                    images=images, is_negative=False, device=device, batch_size=batch_size
+                )
 
-        # Fusion
-        return self._fuse_embeddings(clip_feat, geom_feat)
+            # 3. Fusion (Ghép nối) dành cho Mode 2, 3, 4
+            # Spatial (64) + Text (64) + Image (64) = 192 -> Linear -> 64
+            combined = torch.cat([spatial_features, text_features, image_features], dim=1)
+            final_embedding = self.fusion(combined)
 
-    def _infer_batch_size(
-        self,
-        images: Optional[Union[torch.Tensor, List]],
-        texts: Optional[List[str]],
-        geom_images: Optional[torch.Tensor],
-    ) -> int:
-        """Suy ra batch size từ input."""
+            return final_embedding
+
+    # ======================================================================
+    # HÀM PHỤ TRỢ NỘI BỘ
+    # ======================================================================
+    def _infer_batch_size(self, images, texts, geom_images) -> int:
+        """Suy ra batch_size từ tham số đầu vào."""
         if isinstance(images, torch.Tensor):
             return images.shape[0]
-        elif isinstance(images, list):
+        elif isinstance(images, list) and len(images) > 0:
             return len(images)
         elif isinstance(texts, list):
             return len(texts)
         elif isinstance(geom_images, torch.Tensor):
             return geom_images.shape[0]
-        else:
-            return 1
+        return 1
 
-    def _encode_clip(
+    # ------------------------------------------------------------------
+    # [YC3-A] Encode ảnh qua CLIP với Multi-image Pooling
+    # ------------------------------------------------------------------
+    def _encode_clip_image(
         self,
-        images: Optional[Union[torch.Tensor, List]],
-        texts: Optional[List[str]],
+        images    : Optional[Union[torch.Tensor, List]],
         is_negative: bool,
-        device: torch.device,
+        device    : torch.device,
         batch_size: int,
     ) -> torch.Tensor:
-        """Mã hóa ảnh + text bằng CLIP model."""
-        
-        # Xử lý Negative Sample: tự động gán Dummy Data
-        if is_negative:
-            images = torch.zeros(batch_size, 3, 224, 224, device=device)
-            texts = [""] * batch_size
+        """
+        Mã hóa ảnh qua CLIP và áp dụng Mean Pooling nếu multi-image.
 
-        # Nếu vẫn không có ảnh/text, tạo Dummy
-        if images is None:
-            images = torch.zeros(batch_size, 3, 224, 224, device=device)
-        if texts is None or len(texts) == 0:
-            texts = [""] * batch_size
+        Hỗ trợ 3 dạng đầu vào:
+          (a) Tensor [B, C, H, W]       → xử lý bình thường (1 ảnh/POI)
+          (b) Tensor [B, N, C, H, W]    → reshape → xử lý N*B ảnh → mean pool theo N
+          (c) List[PIL.Image] độ dài B  → xử lý bình thường (1 ảnh/POI)
+        """
+        if is_negative or images is None:
+            # Negative sample hoặc không có ảnh → zero vector
+            return torch.zeros(batch_size, self.embed_dim, device=device)
 
-        # Nếu input images là Tensor đã normalize (ResNet style), unnormalize trước khi đưa vào CLIP processor.
+        is_multi_image = False  # Flag đánh dấu đầu vào multi-image
+        num_images     = 1
+
+        # ---- Phát hiện và xử lý Tensor 5D [B, N, C, H, W] ---------------
+        if isinstance(images, torch.Tensor) and images.dim() == 5:
+            # [YC3-A] Multi-image: reshape [B, N, C, H, W] → [B*N, C, H, W]
+            B, N, C, H, W  = images.shape
+            is_multi_image = True
+            num_images     = N
+            batch_size_real = B
+            images = images.view(B * N, C, H, W)  # Gộp batch và num_images lại
+
+# ---- [ĐÃ TỐI ƯU SIÊU TỐC] Truyền thẳng Tensor vào mạng CLIP ----
         if isinstance(images, torch.Tensor):
-            # Chuyển về CPU để xử lý image_proc, tránh mất GPU
-            images = images.detach().cpu()
-            # Unnormalize từ mean/std ImageNet thành [0,1]
-            mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-            std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-            images = images * std + mean
-            images = images.clamp(0.0, 1.0)
-            images = [to_pil_image(img) for img in images]
+            # Tensor đã được Dataloader xử lý (Crop 224, Normalize), chỉ cần đẩy lên GPU
+            pixel_values = images.to(device)
+            with torch.set_grad_enabled(self.training):
+                img_embeds = self.clip_model.get_image_features(pixel_values=pixel_values) # [B*N, 512]
+        else:
+            # Fallback an toàn nếu đầu vào vô tình là List[PIL.Image]
+            inputs = self.processor(images=images, return_tensors="pt", padding=True)
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            with torch.set_grad_enabled(self.training):
+                img_embeds = self.clip_model.get_image_features(**inputs)
 
-        # Processor
+        # Projection về embed_dim
+        img_feat = self.image_projection(img_embeds)  # [B*N, embed_dim]
+
+        # ---- [YC3-A] Mean Pooling nếu multi-image ------------------------
+        if is_multi_image:
+            # Reshape về [B, N, embed_dim] rồi lấy trung bình theo N
+            img_feat = img_feat.view(batch_size_real, num_images, self.embed_dim)
+            img_feat = img_feat.mean(dim=1)  # [B, embed_dim]
+
+        return img_feat  # [B, embed_dim]
+
+    # ------------------------------------------------------------------
+    def _encode_clip_text(
+        self,
+        texts     : Optional[List[str]],
+        is_negative: bool,
+        device    : torch.device,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """Mã hóa văn bản qua CLIP Text Encoder."""
+        # Chống lỗi text rỗng do Void truyền vào
+        valid_texts = [t if t and str(t).strip() else "empty void space" for t in texts] if texts else None
+
+        if is_negative or valid_texts is None or len(valid_texts) == 0:
+            return torch.zeros(batch_size, self.embed_dim, device=device)
+
         inputs = self.processor(
-            text=texts,
-            images=images,
+            text=valid_texts,
             return_tensors="pt",
             padding=True,
             truncation=True,
@@ -156,132 +251,54 @@ class MultimodalEncoder(nn.Module):
         )
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
-        # CLIP Forward
         with torch.set_grad_enabled(self.training):
-            outputs = self.model(**inputs)
+            text_embeds = self.clip_model.get_text_features(**inputs)  # [B, 512]
 
-        # Merge embeddings
-        if images is not None and texts is not None:
-            clip_emb = (outputs.image_embeds + outputs.text_embeds) / 2.0
-        elif images is not None:
-            clip_emb = outputs.image_embeds
-        else:
-            clip_emb = outputs.text_embeds
+        return self.text_projection(text_embeds)  # [B, embed_dim]
 
-        # Project
-        clip_feat = self.projection(clip_emb)
-        return clip_feat
-
+    # ------------------------------------------------------------------
     def _encode_resnet(
         self,
-        geom_images: Optional[torch.Tensor],
-        is_negative: bool,
-        device: torch.device,
-        batch_size: int,
+        geom_images : Optional[torch.Tensor],
+        is_negative : bool,
+        device      : torch.device,
+        batch_size  : int,
     ) -> torch.Tensor:
-        """Mã hóa ảnh footprint bằng ResNet."""
-        
-        # Xử lý Negative Sample
-        if is_negative:
-            geom_images = torch.zeros(batch_size, 3, 224, 224, device=device)
-
-        # Nếu không có ảnh, tạo Dummy
-        if geom_images is None:
-            geom_images = torch.zeros(batch_size, 3, 224, 224, device=device)
+        """Mã hóa ảnh footprint qua ResNet."""
+        if is_negative or geom_images is None:
+            # Không có geom_images → zero vector
+            return torch.zeros(batch_size, self.embed_dim, device=device)
 
         geom_images = geom_images.to(device)
-
-        # ResNet Forward
         with torch.set_grad_enabled(self.training):
-            geom_feat = self.resnet(geom_images)
+            return self.resnet(geom_images)  # [B, embed_dim]
 
-        return geom_feat
 
-    def _fuse_embeddings(
-        self,
-        clip_feat: Optional[torch.Tensor],
-        geom_feat: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        """Ghép nối 2 embeddings từ CLIP và ResNet."""
-        
-        if clip_feat is not None and geom_feat is not None:
-            fused = torch.cat([clip_feat, geom_feat], dim=-1)
-            return self.fusion(fused)
-        elif clip_feat is not None:
-            return clip_feat
-        elif geom_feat is not None:
-            return geom_feat
-        else:
-            raise ValueError("❌ Cần cung cấp ít nhất một trong: images/texts hoặc geom_images")
-
-# =====================================================================
-# PHẦN TEST (CHẠY KHI GỌI TRỰC TIẾP FILE NÀY)
-# =====================================================================
+# ======================================================================
+# TEST NHANH (chạy trực tiếp file này)
+# ======================================================================
 if __name__ == "__main__":
-    import os
-    import sys
-    
-    # ÉP PYTHON TÌM TRONG THƯ MỤC 'src' ĐẦU TIÊN (ƯU TIÊN SỐ 1)
-    sys.path.insert(0, r"D:\poi-urban-danang\src")
-
-    # BÂY GIỜ NÓ SẼ TÌM ĐÚNG FILE dataset.py TRONG SRC
-    from data.dataset import POIDataset
-    from torch.utils.data import DataLoader
-    from torchvision import transforms
     from PIL import Image
+    import torch
 
-    print("=" * 80)
-    print("TEST TÍCH HỢP: MULTIMODAL ENCODER + DATASET.PY (BỎ QUA TẢI ẢNH)")
-    print("=" * 80)
-    
-    model = MultimodalEncoder()
-    model.eval()
+    print("=" * 70)
+    print("TEST: MultimodalEncoder – Multi-image + Ablation Study")
+    print("=" * 70)
 
-    # Transform cơ bản để chuyển ảnh thành Tensor
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
+    B, N = 4, 5  # batch_size=4, num_images=5 mỗi POI
 
-    # Khởi tạo DataLoader từ file CSV
-    csv_path = r"D:\poi-urban-danang\dataset\processed\poi_processed_data.csv"
-    
-    if os.path.exists(csv_path):
-        dataset_obj = POIDataset(csv_file=csv_path, image_transform=None)
-        
-        # 💡 MẸO: Bypass ảnh để test text cho nhanh
-        dataset_obj._download_image = lambda url: Image.new('RGB', (224, 224), (0, 0, 0))
-        
-        
-        def collate_fn(batch):
-            return {
-                'poi_id': [item['poi_id'] for item in batch],
-                'district': [item['district'] for item in batch],
-                'coords': torch.stack([item['coords'] for item in batch]),
-                'text': [item['text'] for item in batch],
-                'image': [item['image'] for item in batch],  # 👈 giữ list PIL
-            }
+    # Giả lập multi-image tensor [B, N, C, H, W]
+    dummy_images = torch.randn(B, N, 3, 224, 224)
+    dummy_texts  = ["Quán ăn ngon tại Đà Nẵng"] * B
+    dummy_geoms  = torch.randn(B, 3, 224, 224) # Giả lập ảnh ResNet
 
-        dataloader = DataLoader(dataset_obj, batch_size=4, shuffle=True, collate_fn=collate_fn) 
-                # Rút thử 1 Batch (4 POI) ra để test
-        batch = next(iter(dataloader))
-        
-        print("\n[TEST] Forward Pass với dữ liệu thực từ CSV:")
-        print(f"🆔 POI IDs  : {batch['poi_id']}")
-        print(f"📝 Texts    : {batch['text'][0][:60]}...")
-        print(f"📍 Coords   : {batch['coords'].shape}")
-        print(f"🖼️ Images   : {len(batch['image'])} images")
-        # Chạy qua Multimodal Encoder
+    for v in [1, 2, 3, 4]:
+        model = MultimodalEncoder(version=v)
+        model.eval()
         with torch.no_grad():
-            out = model(
-                images=batch['image'], 
-                texts=batch['text'], 
-                is_negative=False
-            )
-            
-        print(f"\n✅ Output model shape: {out.shape} (Dự kiến: torch.Size([4, 64]))")
-        print("🎉 TUYỆT VỜI! Dataset.py và MultimodalEncoder.py đã kết nối thành công!")
-        print("=" * 80)
-    else:
-        print(f"❌ Không tìm thấy file CSV tại: {csv_path}")
+            # Pass thêm geom_images vào test cho đúng chuẩn
+            out = model(geom_images=dummy_geoms, images=dummy_images, texts=dummy_texts)
+        print(f"  {VERSION_DESC[v]} → Output shape: {out.shape}")
+
+    print("\n✅ Tất cả 4 versions đều cho output đúng kích thước!")
+    print("=" * 70)

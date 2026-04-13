@@ -40,10 +40,6 @@ download_all("D:/poi-urban-danang/dataset/processed/poi_data_ggmap.csv",
              id_col="place_id", 
              url_col="image_urls")
 
-# Truyền đúng tên cột cho Foody
-download_all("D:/poi-urban-danang/dataset/processed/poi_data_foody.csv", 
-             "D:/poi-urban-danang/dataset/poi_images_foody",
-             id_col="RestaurantID", 
-             url_col="Image_URL")
+
              
 print("✅ Hoàn tất tải ảnh!")

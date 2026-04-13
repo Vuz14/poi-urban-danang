@@ -168,7 +168,7 @@ with tab4:
                 import torch
                 from PIL import Image
                 from torchvision import transforms
-                from src.encoder.multimodal_encoder import MultimodalEncoder
+                from encoder.multimodal_encoder import MultimodalEncoder
                 import torch.nn.functional as F
                 
                 device = "cuda" if torch.cuda.is_available() else "cpu"
