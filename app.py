@@ -168,7 +168,7 @@ with tab4:
                 import torch
                 from PIL import Image
                 from torchvision import transforms
-                from src.encoder.multimodal import MultimodalEncoder
+                from encoder.multimodal_encoder import MultimodalEncoder
                 import torch.nn.functional as F
                 
                 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -180,7 +180,10 @@ with tab4:
                 
                 # Nạp mô hình AI
                 model = MultimodalEncoder().to(device)
-                model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+                # Cho phép tải weights cũ (nếu có) mà không crash khi thiếu tham số.
+                state = torch.load(model_path, map_location=device, weights_only=True)
+                model.load_state_dict(state, strict=False)
+
                 model.eval()
                 
                 transform = transforms.Compose([
