@@ -1,51 +1,80 @@
-import pandas as pd
+import os
+import osmnx as ox
 import numpy as np
 import torch
-import osmnx as ox
-import networkx as nx
+import pandas as pd
 from tqdm import tqdm
-import os
+import networkx as nx
 
-# Cấu hình đường dẫn
-POI_PATH = r"D:\poi-urban-danang\dataset\processed\poi_processed_data.csv"
-VOID_PATH = r"D:\poi-urban-danang\dataset\sampling\urban_voids.csv"
-OUTPUT_FILE = r"D:\poi-urban-danang\dataset\processed\street_dist_matrix.pt"
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 def compute_street_distances():
-    if not os.path.exists(POI_PATH) or not os.path.exists(VOID_PATH):
-        print("❌ Lỗi: Thiếu file POI hoặc file Urban Voids. Hãy chạy pds_sampler.py trước!")
+    MASTER_NODES_PATH = os.path.join(PROJECT_ROOT, "dataset/processed/master_nodes.csv")
+    OUTPUT_FILE = os.path.join(PROJECT_ROOT, "dataset/processed/street_dist_matrix.pt")
+    TEMP_MMAP = os.path.join(PROJECT_ROOT, "dataset/processed/temp_dist.mmap")
+    
+    if not os.path.exists(MASTER_NODES_PATH):
+        print(f"❌ Không tìm thấy file: {MASTER_NODES_PATH}")
         return
 
-    print("🌍 Tải mạng lưới giao thông Đà Nẵng...")
-    G = ox.graph_from_place('Da Nang, Vietnam', network_type='drive')
+    df_master = pd.read_csv(MASTER_NODES_PATH)
+    n_total = len(df_master) # Khoảng 133k
     
-    # 1. Gộp tọa độ của cả POI và Voids lại thành một danh sách duy nhất
-    df_poi = pd.read_csv(POI_PATH)
-    df_void = pd.read_csv(VOID_PATH)
-    
-    # Kết hợp tọa độ: POI sẽ nằm từ index 0 đến 552, sau đó là các điểm Voids
-    combined_lats = list(df_poi['Lat']) + list(df_void['Lat'])
-    combined_lons = list(df_poi['Lon']) + list(df_void['Lon'])
-    n_total = len(combined_lats)
-    
-    print(f"📍 Tổng cộng: {len(df_poi)} POIs + {len(df_void)} Voids = {n_total} điểm.")
-    
-    print("📍 Ánh xạ tất cả các điểm vào nút giao thông...")
-    nodes = ox.distance.nearest_nodes(G, X=combined_lons, Y=combined_lats)
-    
-    dist_matrix = np.zeros((n_total, n_total))
-    
-    print("🚗 Tính toán Dijkstra cho ma trận tổng hợp...")
-    for i in tqdm(range(n_total)):
-        try:
-            lengths = nx.single_source_dijkstra_path_length(G, nodes[i], weight='length')
-            for j in range(n_total):
-                dist_matrix[i][j] = lengths.get(nodes[j], 15000.0)
-        except Exception:
-            dist_matrix[i, :] = 15000.0
+    # Xác định các hàng là POI thực tế (loại bỏ urban_voids khỏi danh sách làm gốc)
+    is_poi = df_master['Source'] != 'urban_voids'
+    poi_indices = df_master.index[is_poi].tolist()
+    n_pois = len(poi_indices) # Khoảng 6k
 
-    torch.save(torch.tensor(dist_matrix, dtype=torch.float32), OUTPUT_FILE)
-    print(f"✅ Đã lưu ma trận tổng hợp tại: {OUTPUT_FILE}")
+    print(f"📦 Cấu hình ma trận tối ưu: [{n_pois} POIs x {n_total} Total Nodes]")
+    
+    # 1. Tải đồ thị mạng lưới đường
+    try:
+        G = ox.graph_from_place('Da Nang, Vietnam', network_type='drive')
+    except Exception:
+        G = ox.graph_from_place('Hai Chau District, Da Nang, Vietnam', network_type='drive')
+        
+    # Ánh xạ tọa độ sang IDs trên đồ thị OSMnx
+    nodes_on_graph = ox.distance.nearest_nodes(G, X=df_master['Lon'].tolist(), Y=df_master['Lat'].tolist())
+    
+    # 2. Sử dụng Memory Mapping để chống tràn RAM
+    # Thay vì khởi tạo mảng 3GB trên RAM, ta khởi tạo trên ổ cứng
+    dist_matrix_mmap = np.memmap(TEMP_MMAP, dtype='float32', mode='w+', shape=(n_pois, n_total))
+    dist_matrix_mmap[:] = 15000.0 # Giá trị mặc định 15km
+
+    print(f"🚗 Đang tính toán Dijkstra cho {n_pois} điểm gốc...")
+    
+    for idx_in_matrix, i in enumerate(tqdm(poi_indices)):
+        try:
+            # Tính toán đường đi ngắn nhất từ 1 POI đến TẤT CẢ các node khác trong đồ thị
+            source_node = nodes_on_graph[i]
+            lengths = nx.single_source_dijkstra_path_length(G, source_node, weight='length')
+            
+            # Cập nhật khoảng cách cho tất cả 133k điểm trong hàng tương ứng
+            for j in range(n_total):
+                target_node = nodes_on_graph[j]
+                if target_node in lengths:
+                    dist_matrix_mmap[idx_in_matrix, j] = lengths[target_node]
+            
+            # Lưu dữ liệu xuống đĩa sau mỗi 100 vòng lặp để giải phóng bộ nhớ đệm
+            if idx_in_matrix % 100 == 0:
+                dist_matrix_mmap.flush()
+                
+        except Exception:
+            continue
+
+    # 3. Chuyển sang định dạng PyTorch Tensor để dùng trong Model
+    print("\n💾 Đang đóng gói dữ liệu vào Tensor...")
+    # Chuyển đổi từ memmap sang tensor (lúc này máy sẽ cần khoảng 3GB RAM trống để load lên và save)
+    final_tensor = torch.from_numpy(np.array(dist_matrix_mmap))
+    torch.save(final_tensor, OUTPUT_FILE)
+    
+    # Dọn dẹp file tạm
+    del dist_matrix_mmap
+    if os.path.exists(TEMP_MMAP):
+        os.remove(TEMP_MMAP)
+        
+    print(f"✅ Hoàn thành! Kích thước file: {n_pois}x{n_total}")
+    print(f"📁 Lưu tại: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     compute_street_distances()
