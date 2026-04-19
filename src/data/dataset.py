@@ -137,7 +137,7 @@ class POIDataset(Dataset):
         # Lấy ảnh đa giác tòa nhà cho ResNet (FIX LỖI TÊN FILE VÀ DẤU `:`)
         safe_poi_id = str(poi_id).replace(':', '_')
         if self.geom_image_dir:
-            geom_path = os.path.join(self.geom_image_dir, f"building_gg_{safe_poi_id}.png")
+            geom_path = os.path.join(self.geom_image_dir, f"google_maps_{safe_poi_id}.png")
             if os.path.exists(geom_path):
                 try: 
                     geom_img = Image.open(geom_path)
@@ -187,7 +187,7 @@ class POIDataset(Dataset):
 
             # Dummy Geom Image cho Void (Fix lỗi đọc nhầm file geom_path của POI)
             if self.void_geom_image_dir:
-                void_geom_path = os.path.join(self.void_geom_image_dir, f"building_{void_id}.png")
+                void_geom_path = os.path.join(self.void_geom_image_dir, f"{void_id}.png")
                 if os.path.exists(void_geom_path):
                     try: 
                         void_geom_img = Image.open(void_geom_path)

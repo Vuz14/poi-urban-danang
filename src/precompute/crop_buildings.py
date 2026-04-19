@@ -8,39 +8,8 @@ import geopandas as gpd
 from shapely.geometry import Point
 from tqdm import tqdm
 
-# Lấy đường dẫn gốc của project (poi-urban-danang) bất kể người dùng đang đứng ở thư mục nào để chạy lệnh
+# Lấy đường dẫn gốc của project
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-
-# Cấu hình danh sách các dataset cần xử lý thành mảng (Generalize)
-DATASETS = [
-    {
-        "name": "Foody POI",
-        "csv_path": os.path.join(PROJECT_ROOT, "dataset/processed/poi_processed_data.csv"),
-        "out_dir": os.path.join(PROJECT_ROOT, "dataset/building_images_foody"),
-        "lat_col": "Lat",
-        "lon_col": "Lon",
-        "id_col": "RestaurantID",
-        "prefix": "building"
-    },
-    {
-        "name": "Google Maps POI",
-        "csv_path": os.path.join(PROJECT_ROOT, "dataset/processed/poi_data_ggmap.csv"),
-        "out_dir": os.path.join(PROJECT_ROOT, "dataset/building_images_ggmap"),
-        "lat_col": "lat",
-        "lon_col": "lng",
-        "id_col": "place_id",
-        "prefix": "building_gg"
-    },
-    {
-        "name": "Urban Voids",
-        "csv_path": os.path.join(PROJECT_ROOT, "dataset/sampling/urban_voids.csv"),
-        "out_dir": os.path.join(PROJECT_ROOT, "dataset/building_images_voids"), # Tạo hẳn thư mục riêng cho Voids cho sạch
-        "lat_col": "Lat",
-        "lon_col": "Lon",
-        "id_col": None, # Dùng index mặc định
-        "prefix": "void"
-    }
-]
 
 def get_danang_buildings():
     """Tải và lưu trữ offline (cache) toàn phần tòa nhà thuộc Đà Nẵng."""
@@ -49,7 +18,7 @@ def get_danang_buildings():
         print(f"📦 Đang đọc dữ liệu tòa nhà từ bộ đệm Local: {cache_file}")
         gdf = gpd.read_file(cache_file)
     else:
-        print("🌐 Đang tải tải vể bản đồ toàn thành phố Đà Nẵng từ mạng (Chỉ mất 1-2 phút duy nhất vòng đời)...")
+        print("🌐 Đang tải bản đồ toàn thành phố Đà Nẵng từ mạng (Chỉ mất 1-2 phút duy nhất vòng đời)...")
         gdf = ox.features_from_place("Da Nang, Vietnam", tags={'building': True})
         
         gdf = gdf[gdf.geometry.notnull()]
@@ -64,8 +33,7 @@ def get_danang_buildings():
 def main():
     plt.ioff() # Tắt chế độ vẽ không tương tác
     
-    # [LƯU Ý]: Đã chặn/xóa bỏ đoạn code `shutil.rmtree()` cũ để bảo toàn dữ liệu Foody bạn đã tốn thời gian chạy trước đó!
-    print("✅ Cơ chế an toàn hoạt động: Không xóa các ảnh đã tồn tại trước đây.")
+    print("✅ Cơ chế an toàn hoạt động: Không vẽ lại/xóa các ảnh đã tồn tại trước đây.")
 
     # 1. Khởi tạo Không gian bản đồ (Spatial Environment)
     gdf_buildings = get_danang_buildings()
@@ -77,35 +45,38 @@ def main():
     sidx = gdf_buildings_proj.sindex
 
     print("="*50)
-    for ds in DATASETS:
-        csv_path = ds["csv_path"]
-        out_dir = ds["out_dir"]
+    
+    # Thiết lập 2 Domain độc lập
+    domains = ["google_maps", "foody"]
+    
+    for domain in domains:
+        # File Master nodes chứa cả POI và Voids đã sinh ra từ bước PDS
+        master_csv = os.path.join(PROJECT_ROOT, f"dataset/processed/master_nodes_{domain}.csv")
+        # Thư mục chứa ảnh tách biệt cho từng domain
+        out_dir = os.path.join(PROJECT_ROOT, f"dataset/building_images_{domain}")
         
-        if not os.path.exists(csv_path):
-            print(f"⚠️ Bỏ qua {ds['name']}: Không tìm thấy file {csv_path}")
+        if not os.path.exists(master_csv):
+            print(f"⚠️ Bỏ qua {domain}: Không tìm thấy file {master_csv}")
             continue
             
         os.makedirs(out_dir, exist_ok=True)
-        df = pd.read_csv(csv_path)
-        print(f"\n🚀 Bắt đầu xử lý dải {ds['name']} ({len(df)} điểm)")
+        df = pd.read_csv(master_csv)
+        print(f"\n🚀 Bắt đầu trích xuất ảnh Building cho Domain: {domain.upper()} (Tổng {len(df)} điểm)")
         print(f"📁 Lưu tại: {out_dir}")
         
         for idx, row in tqdm(df.iterrows(), total=len(df)):
-            lat = row.get(ds["lat_col"])
-            lon = row.get(ds["lon_col"])
+            lat = row.get("Lat")
+            lon = row.get("Lon")
+            global_id = row.get("Global_ID")
             
-            if pd.isna(lat) or pd.isna(lon):
+            # Bỏ qua nếu dòng bị lỗi thiếu data
+            if pd.isna(lat) or pd.isna(lon) or pd.isna(global_id):
                 continue
             
-            if ds["id_col"] and ds["id_col"] in row:
-                item_id = row[ds["id_col"]]
-            else:
-                item_id = idx 
-                
-            clean_id = str(item_id).replace(':', '_')
-            fname = os.path.join(out_dir, f"{ds['prefix']}_{clean_id}.png")
+            # Sử dụng Global_ID làm tên file (ví dụ: foody_123.png hoặc void_foody_45.png)
+            fname = os.path.join(out_dir, f"{global_id}.png")
             
-            # TRỌNG TÂM: Chỉ khi File KHÔNG tồn tại mới tốn công sức vẽ/tính toán. Ảnh đã có thì Skip qua ngay lập tức -> Rất có ích cho Foody!
+            # TRỌNG TÂM: Ảnh đã có thì Skip qua ngay lập tức -> Tiết kiệm hàng giờ chạy lại!
             if not os.path.exists(fname):
                 try:
                     # Chuyển đổi điểm POI vào trong hệ UTM của bản đồ
@@ -115,7 +86,7 @@ def main():
                     # Buffer mổ ra chu vi hình tròn 100 mét quanh POI
                     buffer_poly = pt_proj.iloc[0].buffer(100)
                     
-                    # Lấy những Tòa nhà giao cắt nằm lọt trong hoặc cắt ngang Buffer (Rất nhanh nhờ Spatial Index R-tree)
+                    # Lấy những Tòa nhà giao cắt nằm lọt trong hoặc cắt ngang Buffer
                     possible_matches_index = list(sidx.intersection(buffer_poly.bounds))
                     possible_matches = gdf_buildings_proj.iloc[possible_matches_index]
                     precise_matches = possible_matches[possible_matches.intersects(buffer_poly)]
@@ -146,7 +117,7 @@ def main():
                     Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8)).save(fname)
                     plt.close()
                 
-    print("\n✅ Hoàn thành toàn bộ quá trình siêu tốc!")
+    print("\n✅ Hoàn thành toàn bộ quá trình vẽ Building Footprints cho cả 2 Domains!")
 
 if __name__ == "__main__":
     main()

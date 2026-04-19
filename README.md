@@ -18,10 +18,10 @@ pip install -r requirements.txt
 
 
 
-1. Chuẩn bị Dữ liệu (Data Preprocessing) Tính toán không gian và thu thập hình dáng đa giác tòa nhà từ tọa độ 553 POI.
+1. Chuẩn bị Dữ liệu (Data Preprocessing) 
+Tính toán không gian và thu thập hình dáng đa giác tòa nhà từ tọa độ 553 POI.
 
-Gộp và Chuẩn hóa Dữ liệu (Data Merging) Bước đầu tiên bắt buộc phải chạy để gộp 2 file thô (poi_data_foody.csv và poi_data_ggmap.csv) thành một file duy nhất đồng bộ các cột.
-
+Xử lý và Chuẩn hóa Dữ liệu ĐỘC LẬP (Data Cleaning): Bước này sẽ đọc 2 file thô (`poi_data_foody.csv` và `poi_data_ggmap.csv`), làm sạch, đồng bộ tên các cột (Lat/Lon) nhưng KHÔNG GỘP CHUNG. Đầu ra tạo thành 2 file xử lý riêng biệt để phục vụ Domain Adaptation.
 
 python dataset/processed/prepare_data.py
 

@@ -36,15 +36,14 @@ print("🔇 Đã tắt RequestsDependencyWarning")
 # =========================================================================
 TRAINING_VERSION: int = 1  # ← ĐỔI SỐ NÀY ĐỂ CHUYỂN VERSION 
 
-# =========================================================================
+
 # CẤU HÌNH ĐƯỜNG DẪN VÀ SIÊU THAM SỐ
 # =========================================================================
-# BẮT BUỘC dùng file đã filter để V1 không bị kẹt ở loss 0.6931
 CSV_PATH      = "dataset/processed/poi_data_ggmap_v1_filtered.csv" 
-IMAGE_DIR     = r"D:/poi-urban-danang/dataset/poi_images_ggmap"
-VOID_PATH     = "dataset/sampling/urban_voids.csv"
-GEOM_DIR      = r"D:/poi-urban-danang/dataset/building_images_ggmap"
-VOID_GEOM_DIR = r"D:/poi-urban-danang/dataset/building_images_voids"
+IMAGE_DIR     = "dataset/poi_images_ggmap" 
+VOID_PATH     = "dataset/sampling/urban_voids_google_maps.csv" 
+GEOM_DIR      = "dataset/building_images_google_maps" 
+VOID_GEOM_DIR = "dataset/building_images_google_maps"
 
 BATCH_SIZE  = 32
 NUM_EPOCHS  = 10
