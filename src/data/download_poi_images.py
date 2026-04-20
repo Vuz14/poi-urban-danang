@@ -65,7 +65,7 @@ if __name__ == "__main__":
         csv_file=GGMAP_CSV, 
         save_folder=GGMAP_IMG_DIR, 
         id_col="Global_ID", 
-        url_col="URL"
+        url_col="Image_URL"
     )
 
     # Tải ảnh cho Foody

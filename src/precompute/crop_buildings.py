@@ -7,6 +7,11 @@ import os
 import geopandas as gpd
 from shapely.geometry import Point
 from tqdm import tqdm
+import warnings
+
+# Tắt cảnh báo DeprecationWarning của Geopandas
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*unary_union.*")
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 
@@ -15,7 +20,7 @@ def get_danang_environment():
     boundary_cache = os.path.join(PROJECT_ROOT, "dataset", "danang_boundary_cache.gpkg")
     
     if os.path.exists(boundary_cache):
-        print(f"📦 Đang đọc Ranh giới đất liền từ Local: {boundary_cache}")
+        print(f"📦 Đang đọc Ranh giới đất liền từ Local...")
         gdf_boundary = gpd.read_file(boundary_cache)
     else:
         print("🌊 Đang tải Ranh giới đất liền Đà Nẵng...")
@@ -24,7 +29,7 @@ def get_danang_environment():
         gdf_boundary.to_file(boundary_cache, driver="GPKG")
 
     if os.path.exists(buildings_cache):
-        print(f"📦 Đang đọc dữ liệu Tòa nhà từ Local: {buildings_cache}")
+        print(f"📦 Đang đọc dữ liệu Tòa nhà từ Local...")
         gdf_buildings = gpd.read_file(buildings_cache)
     else:
         print("🏙️ Đang tải bản đồ Tòa nhà toàn thành phố Đà Nẵng...")
@@ -36,7 +41,7 @@ def get_danang_environment():
 
 def main():
     plt.ioff()
-    print("🛡️ Cơ chế an toàn kích hoạt: Cắt ảnh & Lọc POI lỗi trực tiếp.")
+    print("🛡️ Cơ chế: CHỈ LỌC ĐIỂM RỚT BIỂN - Giữ lại các khu vực trống/chưa có map.")
 
     gdf_buildings, gdf_boundary = get_danang_environment()
     
@@ -44,7 +49,11 @@ def main():
     gdf_buildings_proj = ox.projection.project_gdf(gdf_buildings)
     gdf_boundary_proj = ox.projection.project_gdf(gdf_boundary)
     
-    land_polygon = gdf_boundary_proj.geometry.unary_union
+    # Cập nhật hàm union_all() thay cho unary_union để tránh cảnh báo
+    try:
+        land_polygon = gdf_boundary_proj.geometry.union_all()
+    except AttributeError:
+        land_polygon = gdf_boundary_proj.geometry.unary_union
     
     print("🔎 Đang xây dựng R-tree Spatial Index...")
     sidx = gdf_buildings_proj.sindex
@@ -65,7 +74,7 @@ def main():
         df = pd.read_csv(master_csv)
         print(f"\n🚀 Domain: {domain.upper()} (Tổng {len(df)} điểm gốc)")
         
-        valid_rows = [] # Danh sách lưu các POI hợp lệ
+        valid_rows = [] 
         
         for idx, row in tqdm(df.iterrows(), total=len(df)):
             lat, lon, global_id = row.get("Lat"), row.get("Lon"), row.get("Global_ID")
@@ -75,17 +84,21 @@ def main():
             
             fname = os.path.join(out_dir, f"{global_id}.png")
             
-            if not os.path.exists(fname):
-                try:
-                    pt = gpd.GeoSeries([Point(lon, lat)], crs="EPSG:4326")
-                    pt_proj = pt.to_crs(gdf_buildings_proj.crs)
-                    point_geom = pt_proj.iloc[0]
-                    
-                    # Nếu rớt biển -> Không thèm vẽ, bỏ qua luôn
-                    if not land_polygon.contains(point_geom):
-                        continue
-
-                    buffer_poly = point_geom.buffer(100)
+            try:
+                pt = gpd.GeoSeries([Point(lon, lat)], crs="EPSG:4326")
+                pt_proj = pt.to_crs(gdf_buildings_proj.crs)
+                point_geom = pt_proj.iloc[0]
+                
+                # BƯỚC LỌC DUY NHẤT: Bỏ những quán nằm ngoài đất liền (rớt biển)
+                if not land_polygon.contains(point_geom):
+                    if os.path.exists(fname):
+                        os.remove(fname)
+                    continue # Bỏ qua điểm này, không đưa vào valid_rows
+                
+                # Nếu nằm trên đất liền, tạo ảnh tòa nhà (hoặc ảnh xám trống)
+                if not os.path.exists(fname):
+                    # Tăng buffer lên 150m để quét rộng hơn, dễ trúng nhà hơn
+                    buffer_poly = point_geom.buffer(150) 
                     possible_matches_index = list(sidx.intersection(buffer_poly.bounds))
                     possible_matches = gdf_buildings_proj.iloc[possible_matches_index]
                     precise_matches = possible_matches[possible_matches.intersects(buffer_poly)]
@@ -106,22 +119,18 @@ def main():
                     plt.savefig(fname, facecolor=SAFE_BACKGROUND, pad_inches=0)
                     plt.close(fig)
                     
-                    Image.open(fname).convert('RGB').resize((224, 224)).save(fname)
-                    
-                except Exception:
-                    plt.close()
-                    continue
+                    with Image.open(fname) as img:
+                        img_resized = img.convert('RGB').resize((224, 224))
+                    img_resized.save(fname)
 
-            # BƯỚC TÍCH HỢP TỪ SPLIT_DATASET: Kiểm tra lại ảnh
-            if os.path.exists(fname):
-                try:
-                    img_arr = np.array(Image.open(fname).convert('RGB'))
-                    if np.sum(img_arr) > 0:  # Không phải đen tuyệt đối
-                        valid_rows.append(row)
-                except Exception:
-                    continue
-        
-        # Lưu file clean
+                # Lưu POI vào danh sách hợp lệ
+                valid_rows.append(row)
+
+            except Exception:
+                plt.close('all')
+                continue
+
+        # Lưu lại file CSV các tọa độ đã được làm sạch
         if valid_rows:
             df_clean = pd.DataFrame(valid_rows)
             clean_csv_path = os.path.join(PROJECT_ROOT, f"dataset/processed/master_nodes_{domain}_clean.csv")
