@@ -3,9 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class InfoNCELoss(nn.Module):
-    def __init__(self, temperature=0.05):
+    def __init__(self, temperature=0.05, label_smoothing=0.0):
         super().__init__()
         self.tau = temperature
+        self.label_smoothing = label_smoothing
         
     def forward(self, anchor_group, positive_group, negative_groups):
         """
@@ -19,15 +20,20 @@ class InfoNCELoss(nn.Module):
         if negative_groups.dim() == 1:
             negative_groups = negative_groups.unsqueeze(0)
 
-        # 2. TÍNH TƯƠNG ĐỒNG BẰNG CHIỀU CUỐI CÙNG (dim=-1) ĐỂ KHÔNG BAO GIỜ LỖI
+        # 2. Chuẩn hóa embedding để cosine ổn định hơn và tránh scale drift.
+        anchor_group = F.normalize(anchor_group, p=2, dim=-1)
+        positive_group = F.normalize(positive_group, p=2, dim=-1)
+        negative_groups = F.normalize(negative_groups, p=2, dim=-1)
+
+        # 3. TÍNH TƯƠNG ĐỒNG BẰNG CHIỀU CUỐI CÙNG (dim=-1)
         sim_pos = F.cosine_similarity(anchor_group, positive_group, dim=-1).unsqueeze(-1) / self.tau
         sim_neg = F.cosine_similarity(anchor_group.unsqueeze(1), negative_groups.unsqueeze(0), dim=-1) / self.tau
         
-        # 3. TÍNH LOSS
+        # 4. TÍNH LOSS
         logits = torch.cat([sim_pos, sim_neg], dim=1)
         labels = torch.zeros(logits.shape[0], dtype=torch.long, device=anchor_group.device)
         
-        return F.cross_entropy(logits, labels)
+        return F.cross_entropy(logits, labels, label_smoothing=self.label_smoothing)
 
 class AdaptiveTripletLoss(nn.Module):
     def __init__(self, lamba=50.0):

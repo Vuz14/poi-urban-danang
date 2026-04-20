@@ -74,11 +74,28 @@ class POIDataset(Dataset):
         # ------------------------------------------------------------------
         # [HARD-NEG] PRE-COMPUTE SPATIAL NEAREST NEIGHBORS (K=30)
         # ------------------------------------------------------------------
+        # coords = self.data[['Lat', 'Lon']].values
+        # nn_model = NearestNeighbors(n_neighbors=31, metric='haversine')  # 31 để loại self
+        # nn_model.fit(np.radians(coords))
+        # distances, indices = nn_model.kneighbors(np.radians(coords))
+        # self.nearest_indices = indices[:, 1:31]   # loại index 0 (chính nó), lấy 30 POI gần nhất
+
+        # ------------------------------------------------------------------
+        # [HARD-NEG] PRE-COMPUTE SPATIAL NEAREST NEIGHBORS (K=30) có Margin
+        # ------------------------------------------------------------------
         coords = self.data[['Lat', 'Lon']].values
-        nn_model = NearestNeighbors(n_neighbors=31, metric='haversine')  # 31 để loại self
+        
+        # Tăng số lượng lân cận cần tìm lên 35 để bù đắp cho những điểm sẽ bị bỏ qua
+        nn_model = NearestNeighbors(n_neighbors=35, metric='haversine')  
         nn_model.fit(np.radians(coords))
         distances, indices = nn_model.kneighbors(np.radians(coords))
-        self.nearest_indices = indices[:, 1:31]   # loại index 0 (chính nó), lấy 30 POI gần nhất
+        
+        # 🔥 CHIẾN THUẬT TẠO KHOẢNG CÁCH AN TOÀN (MARGIN):
+        # Index 0 là chính nó.
+        # Index 1, 2, 3 thường là các cửa hàng/POI nằm chung 1 tòa nhà hoặc sát vách, 
+        # ảnh vệ tinh của chúng sẽ y hệt nhau -> BỎ QUA để tránh gây nhiễu hàm loss.
+        # Ta sẽ bắt đầu lấy mẫu âm (negative) từ người hàng xóm thứ 4 trở đi.
+        self.nearest_indices = indices[:, 4:34]
         
         print(f"✅ Precomputed nearest neighbors cho {len(self.data)} POI (K=30)")
         print(f"✅ POIDataset khởi tạo: {len(self.data)} POI | Source = Google Maps (ggmap)")

@@ -22,6 +22,7 @@ import yaml
 from torchvision import models
 from torchvision.transforms.functional import to_pil_image
 from transformers import CLIPModel, CLIPProcessor
+import torch.nn.functional as F
 
 
 # Ánh xạ version → mô tả để in log
@@ -31,6 +32,19 @@ VERSION_DESC = {
     3: "V3: Không gian + Image",
     4: "V4: Full (Không gian + Text + Image)",
 }
+
+
+def _as_clip_feature_tensor(features: Union[torch.Tensor, object]) -> torch.Tensor:
+    """CLIPModel.get_{image,text}_features trả Tensor (transformers cũ) hoặc
+    BaseModelOutputWithPooling với embedding ở .pooler_output (transformers mới)."""
+    if isinstance(features, torch.Tensor):
+        return features
+    pooler = getattr(features, "pooler_output", None)
+    if isinstance(pooler, torch.Tensor):
+        return pooler
+    raise TypeError(
+        f"CLIP features phải là Tensor hoặc object có pooler_output Tensor, nhận được {type(features)}"
+    )
 
 
 class MultimodalEncoder(nn.Module):
@@ -85,18 +99,32 @@ class MultimodalEncoder(nn.Module):
 
         # ---- CLIP (Text + Image) ------------------------------------------
         self.clip_model  = CLIPModel.from_pretrained(clip_model_name)
-        self.processor   = CLIPProcessor.from_pretrained(clip_model_name)
+        self.processor   = CLIPProcessor.from_pretrained(clip_model_name, use_fast=False)
         clip_proj_dim    = self.clip_model.config.projection_dim  # thường = 512
 
         # Projection riêng cho từng modality (Text và Image)
         self.text_projection  = nn.Linear(clip_proj_dim, embed_dim)
         self.image_projection = nn.Linear(clip_proj_dim, embed_dim)
 
-        # ---- ResNet (Geom / Footprint) ------------------------------------
+# ---- ResNet (Geom / Footprint) ------------------------------------
         self.resnet     = getattr(models, resnet_model_name)(
             weights=models.ResNet50_Weights.IMAGENET1K_V2
         )
         self.resnet.fc  = nn.Linear(self.resnet.fc.in_features, embed_dim)
+
+        # 🔥 CHIẾN THUẬT CHỐNG OVERFITTING: Đóng băng ResNet
+        # 1. Đóng băng toàn bộ trọng số gốc
+        for param in self.resnet.parameters():
+            param.requires_grad = False
+            
+        # 2. Chỉ mở khóa block 'layer4' (học đặc trưng không gian phức tạp nhất)
+        if hasattr(self.resnet, 'layer4'):
+            for param in self.resnet.layer4.parameters():
+                param.requires_grad = True
+                
+        # 3. Mở khóa lớp 'fc' (vì đây là lớp chúng ta mới khởi tạo để ép về embed_dim)
+        for param in self.resnet.fc.parameters():
+            param.requires_grad = True
 
         # ---- Fusion layers (luôn nhận 3 * embed_dim → embed_dim) ----------
         # [YC3-B] Các version thiếu modality sẽ dùng zero vector → đầu vào
@@ -105,6 +133,7 @@ class MultimodalEncoder(nn.Module):
             nn.Linear(embed_dim * 3, embed_dim),
             nn.LayerNorm(embed_dim),
             nn.GELU(),
+            nn.Dropout(p=0.3)  # 🔥 THÊM DROPOUT: Tắt ngẫu nhiên 30% nơ-ron để tránh học vẹt
         )
 
     # ======================================================================
@@ -129,7 +158,9 @@ class MultimodalEncoder(nn.Module):
             # Bỏ qua hoàn toàn logic CLIP và lớp Fusion phía sau.
             # -----------------------------------------------------------
             if self.version == 1:
-                return spatial_features
+                # return spatial_features
+                # Chuẩn hóa L2 để vector có độ dài bằng 1
+                return F.normalize(spatial_features, p=2, dim=1)
 
             # 2. Trích xuất Text & Image (CLIP) cho các Version 2, 3, 4
             text_features = torch.zeros(batch_size, self.embed_dim, device=device)
@@ -152,7 +183,9 @@ class MultimodalEncoder(nn.Module):
             combined = torch.cat([spatial_features, text_features, image_features], dim=1)
             final_embedding = self.fusion(combined)
 
-            return final_embedding
+            # return final_embedding
+            # THAY ĐỔI Ở ĐÂY: Thêm L2 Normalize để ép vector lên mặt cầu đơn vị
+            return F.normalize(final_embedding, p=2, dim=1)
 
     # ======================================================================
     # HÀM PHỤ TRỢ NỘI BỘ
@@ -208,13 +241,15 @@ class MultimodalEncoder(nn.Module):
             # Tensor đã được Dataloader xử lý (Crop 224, Normalize), chỉ cần đẩy lên GPU
             pixel_values = images.to(device)
             with torch.set_grad_enabled(self.training):
-                img_embeds = self.clip_model.get_image_features(pixel_values=pixel_values) # [B*N, 512]
+                img_embeds = _as_clip_feature_tensor(
+                    self.clip_model.get_image_features(pixel_values=pixel_values)
+                )  # [B*N, clip_proj_dim]
         else:
             # Fallback an toàn nếu đầu vào vô tình là List[PIL.Image]
             inputs = self.processor(images=images, return_tensors="pt", padding=True)
             inputs = {k: v.to(device) for k, v in inputs.items()}
             with torch.set_grad_enabled(self.training):
-                img_embeds = self.clip_model.get_image_features(**inputs)
+                img_embeds = _as_clip_feature_tensor(self.clip_model.get_image_features(**inputs))
 
         # Projection về embed_dim
         img_feat = self.image_projection(img_embeds)  # [B*N, embed_dim]
@@ -252,7 +287,7 @@ class MultimodalEncoder(nn.Module):
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
         with torch.set_grad_enabled(self.training):
-            text_embeds = self.clip_model.get_text_features(**inputs)  # [B, 512]
+            text_embeds = _as_clip_feature_tensor(self.clip_model.get_text_features(**inputs))
 
         return self.text_projection(text_embeds)  # [B, embed_dim]
 
