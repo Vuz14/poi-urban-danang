@@ -30,15 +30,14 @@ python dataset/processed/prepare_data.py
 python src/precompute/pds_sampler.py
 python src/precompute/prepare_road_network.py
 python src/precompute/crop_buildings.py
+python src/data/download_poi_images.py
 2. Phân tích Dịch chuyển Miền (Domain Shift Analysis) Đo lường sự khác biệt phân phối (Rating, Price) giữa Google Maps và Foody bằng KL Divergence & Wasserstein.
 
 
 python research_pipeline/domain_analysis.py
 
 3. Huấn luyện AI (Model Training) Huấn luyện Multimodal Encoder & Distance-Biased Transformer trên dữ liệu Google Maps.
-python src/data/download_poi_images.py
-python split_dataset.py : để lọc bỏ các điểm đen thui trong file building_images_ggmap
-thiết lập cấu hình TRAINING_VERSION (từ 1 đến 4 tương ứng 4 chế độ Ablation Study ở main.py) và chạy lệnh:
+
 python main.py
  3 file dataset, multimodal_encoder, main.py là những file liên quan nhau tinh chỉnh chiến thuật train thì đọc cả 3 hoặc chỉnh trong main
 

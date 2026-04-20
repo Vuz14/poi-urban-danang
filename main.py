@@ -8,7 +8,7 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 from sklearn.manifold import TSNE
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from torchvision import transforms
 from requests import RequestsDependencyWarning
 
@@ -22,51 +22,27 @@ warnings.filterwarnings("ignore", category=RequestsDependencyWarning)
 print("🔇 Đã tắt RequestsDependencyWarning")
 
 # =========================================================================
-# BIẾN GLOBAL
+# BIẾN GLOBAL & CẤU HÌNH
 # =========================================================================
 TRAINING_VERSION: int = 1  
 
-# =========================================================================
-# CẤU HÌNH ĐƯỜNG DẪN 
-# =========================================================================
-# Đã update trỏ vào thư mục Google Maps (đã clean)
-CSV_PATH      = "dataset/processed/master_nodes_google_maps_clean.csv" 
-IMAGE_DIR     = "dataset/poi_images_ggmap"
-VOID_PATH     = "dataset/sampling/urban_voids_google_maps.csv"
-GEOM_DIR      = "dataset/building_images_google_maps"
-VOID_GEOM_DIR = "dataset/building_images_google_maps"
+# --- TRAIN: GOOGLE MAPS ---
+TRAIN_CSV       = "dataset/processed/master_nodes_google_maps_clean.csv" 
+TRAIN_IMAGE_DIR = "dataset/poi_images_ggmap"
+TRAIN_GEOM_DIR  = "dataset/building_images_google_maps"
+VOID_PATH       = "dataset/sampling/urban_voids_google_maps.csv"
+VOID_GEOM_DIR   = "dataset/building_images_google_maps"
+
+# --- TEST: FOODY (Cross-Domain) ---
+TEST_CSV        = "dataset/processed/master_nodes_foody_clean.csv"
+TEST_IMAGE_DIR  = "dataset/poi_images_foody"
+TEST_GEOM_DIR   = "dataset/building_images_foody"
 
 BATCH_SIZE  = 32
 NUM_EPOCHS  = 10
 GROUP_SIZE  = 8
 TEMPERATURE = 0.5
 LR          = 1e-4
-
-# =========================================================================
-# LOGIC CHIA VÙNG KHÔNG GIAN (SPATIAL SPLIT)
-# =========================================================================
-def spatial_train_test_split(csv_path, fallback_test_district=None):
-    df = pd.read_csv(csv_path)
-    # Lấy POI (bỏ void)
-    df_poi = df[~df['Source'].str.contains('void')].reset_index()
-    
-    district_counts = df_poi['District'].value_counts()
-    print("\n📊 Thống kê số lượng quán theo Quận:")
-    print(district_counts)
-
-    # Tự động lấy quận có ít dữ liệu nhất (hoặc được chỉ định)
-    if fallback_test_district is None or fallback_test_district not in district_counts.index:
-        test_district = district_counts.index[-1]
-    else:
-        test_district = fallback_test_district
-        
-    print(f"🎯 Tự động chọn quận làm tập TEST: {test_district}")
-    
-    # Do POIDataset loại bỏ void khi khởi tạo, index sẽ khớp với df_poi
-    train_idx = df_poi.index[df_poi['District'] != test_district].tolist()
-    test_idx = df_poi.index[df_poi['District'] == test_district].tolist()
-    
-    return train_idx, test_idx
 
 def _encode_neighbor_groups(neighbor_list, multimodal_encoder, group_encoder, device, transform):
     neg_groups_list = []
@@ -115,7 +91,7 @@ def _encode_neighbor_groups(neighbor_list, multimodal_encoder, group_encoder, de
 # =========================================================================
 def train_urban_ai():
     print("=" * 65)
-    print(f"🚀 BẮT ĐẦU HUẤN LUYỆN | {VERSION_DESC[TRAINING_VERSION]}")
+    print(f"🚀 BẮT ĐẦU HUẤN LUYỆN ZERO-SHOT DOMAIN ADAPTATION | {VERSION_DESC[TRAINING_VERSION]}")
     print("=" * 65)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -127,19 +103,23 @@ def train_urban_ai():
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    full_dataset = POIDataset(
-        csv_file            = CSV_PATH,
+    print("\n📚 Nạp tập Huấn luyện (Google Maps)...")
+    train_dataset = POIDataset(
+        csv_file            = TRAIN_CSV,
         image_transform     = transform,
-        image_dir           = IMAGE_DIR,
+        image_dir           = TRAIN_IMAGE_DIR,
         void_csv_file       = VOID_PATH,
-        geom_image_dir      = GEOM_DIR,
+        geom_image_dir      = TRAIN_GEOM_DIR,
         void_geom_image_dir = VOID_GEOM_DIR,
     )
 
-    # Chia Train/Test theo không gian
-    train_idx, test_idx = spatial_train_test_split(CSV_PATH, fallback_test_district="Son Tra")
-    train_dataset = Subset(full_dataset, train_idx)
-    test_dataset = Subset(full_dataset, test_idx)
+    print("📚 Nạp tập Kiểm thử (Foody)...")
+    test_dataset = POIDataset(
+        csv_file            = TEST_CSV,
+        image_transform     = transform,
+        image_dir           = TEST_IMAGE_DIR,
+        geom_image_dir      = TEST_GEOM_DIR,
+    )
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True, pin_memory=True, collate_fn=custom_collate_fn, num_workers=4)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, drop_last=False, pin_memory=True, collate_fn=custom_collate_fn, num_workers=4)
@@ -213,11 +193,11 @@ def train_urban_ai():
                     neg_groups_list.append(n_group)
 
             anchor_poi_id = poi_data['poi_id'][0]
-            anchor_full_idx = full_dataset.data[full_dataset.data['RestaurantID'].astype(str) == str(anchor_poi_id)].index
+            anchor_full_idx = train_dataset.data[train_dataset.data['RestaurantID'].astype(str) == str(anchor_poi_id)].index
             
             if len(anchor_full_idx) > 0:
                 idx = int(anchor_full_idx[0])
-                nearest_voids = full_dataset.get_nearest_void_data(idx, k=16)
+                nearest_voids = train_dataset.get_nearest_void_data(idx, k=16)
                 if len(nearest_voids) >= GROUP_SIZE:
                     void_neg_groups = _encode_neighbor_groups(nearest_voids, multimodal_encoder, group_encoder, device, transform)
                     neg_groups_list.extend(void_neg_groups)
@@ -225,7 +205,6 @@ def train_urban_ai():
             if len(neg_groups_list) > 0:
                 negative_groups = torch.cat(neg_groups_list, dim=0)
                 
-                # [MẤU CHỐT]: CHUẨN HÓA L2 TRƯỚC KHI VÀO INFO-NCE
                 anchor_group = F.normalize(anchor_group, p=2, dim=1)
                 positive_group = F.normalize(positive_group, p=2, dim=1)
                 negative_groups = F.normalize(negative_groups, p=2, dim=1)
@@ -284,10 +263,10 @@ def train_urban_ai():
                         neg_groups_list.append(n_group)
 
                 anchor_poi_id = poi_data['poi_id'][0]
-                anchor_full_idx = full_dataset.data[full_dataset.data['RestaurantID'].astype(str) == str(anchor_poi_id)].index
+                anchor_full_idx = test_dataset.data[test_dataset.data['RestaurantID'].astype(str) == str(anchor_poi_id)].index
                 if len(anchor_full_idx) > 0:
                     idx = int(anchor_full_idx[0])
-                    nearest_voids = full_dataset.get_nearest_void_data(idx, k=16)
+                    nearest_voids = test_dataset.get_nearest_void_data(idx, k=16)
                     if len(nearest_voids) >= GROUP_SIZE:
                         void_neg_groups = _encode_neighbor_groups(nearest_voids, multimodal_encoder, group_encoder, device, transform)
                         neg_groups_list.extend(void_neg_groups)
@@ -295,7 +274,6 @@ def train_urban_ai():
                 if len(neg_groups_list) > 0:
                     negative_groups = torch.cat(neg_groups_list, dim=0)
                     
-                    # [MẤU CHỐT]: CHUẨN HÓA L2 TRƯỚC KHI VÀO INFO-NCE CHO TẬP TEST
                     anchor_group = F.normalize(anchor_group, p=2, dim=1)
                     positive_group = F.normalize(positive_group, p=2, dim=1)
                     negative_groups = F.normalize(negative_groups, p=2, dim=1)
@@ -307,7 +285,7 @@ def train_urban_ai():
         avg_test_loss = total_test_loss / max(num_test_batches, 1)
         test_loss_history.append(avg_test_loss)
 
-        print(f"🔄 Epoch [{epoch+1:02d}/{NUM_EPOCHS}] | Train Loss: {avg_train_loss:.4f} | Test Loss: {avg_test_loss:.4f}")
+        print(f"🔄 Epoch [{epoch+1:02d}/{NUM_EPOCHS}] | GG Maps Loss: {avg_train_loss:.4f} | Foody Loss: {avg_test_loss:.4f}")
 
         scheduler.step()
 
@@ -316,12 +294,12 @@ def train_urban_ai():
             os.makedirs("models_saved", exist_ok=True)
             torch.save(multimodal_encoder.state_dict(), f"models_saved/multimodal_best_v{TRAINING_VERSION}.pth")
             torch.save(group_encoder.state_dict(),      f"models_saved/group_encoder_best_v{TRAINING_VERSION}.pth")
-            print(f"   🌟 Đã lưu Best Model! (Test Loss giảm xuống: {best_test_loss:.4f})")
+            print(f"   🌟 Đã lưu Best Model! (Foody Loss giảm xuống: {best_test_loss:.4f})")
 
     os.makedirs("reports/metrics", exist_ok=True)
     df_loss = pd.DataFrame({"Epoch": range(1, NUM_EPOCHS + 1), "Train_Loss": train_loss_history, "Test_Loss": test_loss_history})
     df_loss.to_csv(f"reports/metrics/training_loss_v{TRAINING_VERSION}.csv", index=False)
-    print("\n✅ HOÀN TẤT HUẤN LUYỆN!")
+    print("\n✅ HOÀN TẤT HUẤN LUYỆN ZERO-SHOT!")
 
 def plot_training_loss():
     try:
@@ -329,9 +307,9 @@ def plot_training_loss():
         sns.set_theme(style="whitegrid")
         df_loss = pd.read_csv(f"reports/metrics/training_loss_v{TRAINING_VERSION}.csv")
         plt.figure(figsize=(9, 5))
-        plt.plot(df_loss['Epoch'], df_loss['Train_Loss'], marker='o', color='#d62728', label='Train Loss')
-        plt.plot(df_loss['Epoch'], df_loss['Test_Loss'],  marker='s', color='#1f77b4', label='Test Loss', linestyle='--')
-        plt.title(f"Loss Curve – {VERSION_DESC[TRAINING_VERSION]}")
+        plt.plot(df_loss['Epoch'], df_loss['Train_Loss'], marker='o', color='#d62728', label='GG Maps (Train) Loss')
+        plt.plot(df_loss['Epoch'], df_loss['Test_Loss'],  marker='s', color='#1f77b4', label='Foody (Test) Loss', linestyle='--')
+        plt.title(f"Zero-shot Domain Adaptation Curve – {VERSION_DESC[TRAINING_VERSION]}")
         plt.legend()
         os.makedirs("reports/figures", exist_ok=True)
         plt.savefig(f"reports/figures/loss_curve_v{TRAINING_VERSION}.png", dpi=300, bbox_inches='tight')
@@ -344,8 +322,9 @@ def plot_tsne_clusters():
     except: pass
     
     transform = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor(), transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    full_dataset = POIDataset(csv_file=CSV_PATH, image_transform=transform, image_dir=IMAGE_DIR, geom_image_dir=GEOM_DIR)
-    tsne_loader = DataLoader(full_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=custom_collate_fn, num_workers=4)
+    # T-SNE vẽ thử trên tập Foody (Test)
+    test_dataset = POIDataset(csv_file=TEST_CSV, image_transform=transform, image_dir=TEST_IMAGE_DIR, geom_image_dir=TEST_GEOM_DIR)
+    tsne_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=custom_collate_fn, num_workers=4)
 
     all_features, all_categories = [], []
     model.eval()
@@ -355,18 +334,18 @@ def plot_tsne_clusters():
             images = poi_data['image'].to(device) if isinstance(poi_data['image'], torch.Tensor) else poi_data['image']
             geom_images = poi_data['geom_image'].to(device)
             feats = model(geom_images=geom_images, images=images, texts=poi_data['text'])
-            # Chuẩn hóa L2 trước khi t-SNE để hiển thị chuẩn
             feats = F.normalize(feats, p=2, dim=1) 
             all_features.append(feats.cpu())
             all_categories.extend(poi_data['category'])
 
-    tsne_results = TSNE(n_components=2, random_state=42, perplexity=30).fit_transform(torch.cat(all_features, dim=0).numpy())
-    df_plot = pd.DataFrame({'tsne_x': tsne_results[:, 0], 'tsne_y': tsne_results[:, 1], 'Category': all_categories})
-    plt.figure(figsize=(12, 8))
-    sns.scatterplot(x='tsne_x', y='tsne_y', hue='Category', data=df_plot, legend="full", alpha=0.8)
-    plt.title(f"Phân cụm t-SNE – {VERSION_DESC[TRAINING_VERSION]}")
-    plt.legend(bbox_to_anchor=(1.05, 1), loc=2)
-    plt.savefig(f"reports/figures/tsne_v{TRAINING_VERSION}.png", dpi=300, bbox_inches='tight')
+    if all_features:
+        tsne_results = TSNE(n_components=2, random_state=42, perplexity=30).fit_transform(torch.cat(all_features, dim=0).numpy())
+        df_plot = pd.DataFrame({'tsne_x': tsne_results[:, 0], 'tsne_y': tsne_results[:, 1], 'Category': all_categories})
+        plt.figure(figsize=(12, 8))
+        sns.scatterplot(x='tsne_x', y='tsne_y', hue='Category', data=df_plot, legend="full", alpha=0.8)
+        plt.title(f"Phân cụm t-SNE Foody (Zero-shot) – {VERSION_DESC[TRAINING_VERSION]}")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc=2)
+        plt.savefig(f"reports/figures/tsne_v{TRAINING_VERSION}.png", dpi=300, bbox_inches='tight')
 
 if __name__ == "__main__":
     import multiprocessing

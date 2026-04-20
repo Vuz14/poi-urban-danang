@@ -11,24 +11,18 @@ from tqdm import tqdm
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 def get_danang_environment():
-    """
-    Tải toàn bộ Tòa nhà VÀ Ranh giới đất liền (Land Boundary) của Đà Nẵng.
-    """
     buildings_cache = os.path.join(PROJECT_ROOT, "dataset", "danang_buildings_cache.gpkg")
     boundary_cache = os.path.join(PROJECT_ROOT, "dataset", "danang_boundary_cache.gpkg")
     
-    # 1. Tải ranh giới hành chính (Chống rớt xuống biển)
     if os.path.exists(boundary_cache):
         print(f"📦 Đang đọc Ranh giới đất liền từ Local: {boundary_cache}")
         gdf_boundary = gpd.read_file(boundary_cache)
     else:
-        print("🌊 Đang tải Ranh giới đất liền Đà Nẵng (Loại bỏ biển/đảo xa)...")
-        # geocode_to_gdf lấy chính xác đa giác bao quanh đất liền Đà Nẵng
+        print("🌊 Đang tải Ranh giới đất liền Đà Nẵng...")
         gdf_boundary = ox.geocode_to_gdf("Da Nang, Vietnam")
         os.makedirs(os.path.dirname(boundary_cache), exist_ok=True)
         gdf_boundary.to_file(boundary_cache, driver="GPKG")
 
-    # 2. Tải Tòa nhà
     if os.path.exists(buildings_cache):
         print(f"📦 Đang đọc dữ liệu Tòa nhà từ Local: {buildings_cache}")
         gdf_buildings = gpd.read_file(buildings_cache)
@@ -42,28 +36,23 @@ def get_danang_environment():
 
 def main():
     plt.ioff()
-    print("🛡️ Cơ chế an toàn kích hoạt: Xử lý rớt biển, lỗi GPS & Dead Gradients.")
+    print("🛡️ Cơ chế an toàn kích hoạt: Cắt ảnh & Lọc POI lỗi trực tiếp.")
 
-    # 1. Khởi tạo Không gian bản đồ
     gdf_buildings, gdf_boundary = get_danang_environment()
     
     print("🗺️ Đang chuẩn hóa Hệ tọa độ về dạng Mét (Metric UTM CRS)...")
     gdf_buildings_proj = ox.projection.project_gdf(gdf_buildings)
     gdf_boundary_proj = ox.projection.project_gdf(gdf_boundary)
     
-    # Lấy đa giác đất liền duy nhất
     land_polygon = gdf_boundary_proj.geometry.unary_union
     
-    print("🔎 Đang xây dựng R-tree Spatial Index (Truy vấn hình học siêu tốc)...")
+    print("🔎 Đang xây dựng R-tree Spatial Index...")
     sidx = gdf_buildings_proj.sindex
 
     print("="*50)
     domains = ["google_maps", "foody"]
     
-    # [GIẢI PHÁP 3]: Background xám cực tối chống Dead Gradient cho ResNet
-    # Mã màu #111111 (RGB: 17, 17, 17) giúp Model hiểu là "Đất trống hợp lệ" thay vì ảnh Lỗi.
     SAFE_BACKGROUND = '#111111' 
-    ERROR_BACKGROUND = '#000000' # Đen tuyệt đối cho Lỗi/Rớt xuống biển
 
     for domain in domains:
         master_csv = os.path.join(PROJECT_ROOT, f"dataset/processed/master_nodes_{domain}.csv")
@@ -74,7 +63,9 @@ def main():
             
         os.makedirs(out_dir, exist_ok=True)
         df = pd.read_csv(master_csv)
-        print(f"\n🚀 Domain: {domain.upper()} (Tổng {len(df)} điểm)")
+        print(f"\n🚀 Domain: {domain.upper()} (Tổng {len(df)} điểm gốc)")
+        
+        valid_rows = [] # Danh sách lưu các POI hợp lệ
         
         for idx, row in tqdm(df.iterrows(), total=len(df)):
             lat, lon, global_id = row.get("Lat"), row.get("Lon"), row.get("Global_ID")
@@ -86,28 +77,20 @@ def main():
             
             if not os.path.exists(fname):
                 try:
-                    # Chuyển đổi điểm vào hệ UTM
                     pt = gpd.GeoSeries([Point(lon, lat)], crs="EPSG:4326")
                     pt_proj = pt.to_crs(gdf_buildings_proj.crs)
                     point_geom = pt_proj.iloc[0]
                     
-                    # [GIẢI PHÁP 1]: KIỂM TRA ĐIỂM CÓ NẰM TRÊN ĐẤT LIỀN KHÔNG?
-                    # Nếu điểm rớt xuống biển hoặc ra ngoài Đà Nẵng -> Ảnh đen tuyệt đối (Error)
+                    # Nếu rớt biển -> Không thèm vẽ, bỏ qua luôn
                     if not land_polygon.contains(point_geom):
-                        Image.new('RGB', (224, 224), (0, 0, 0)).save(fname)
                         continue
 
-                    # Buffer mổ ra chu vi hình tròn 100 mét quanh POI
                     buffer_poly = point_geom.buffer(100)
-                    
                     possible_matches_index = list(sidx.intersection(buffer_poly.bounds))
                     possible_matches = gdf_buildings_proj.iloc[possible_matches_index]
                     precise_matches = possible_matches[possible_matches.intersects(buffer_poly)]
                     
-                    # Canvas plot
                     fig, ax = plt.subplots(figsize=(2.24, 2.24), dpi=100)
-                    
-                    # Set nền an toàn (Safe Background)
                     fig.patch.set_facecolor(SAFE_BACKGROUND)
                     ax.set_facecolor(SAFE_BACKGROUND)
                     
@@ -123,13 +106,28 @@ def main():
                     plt.savefig(fname, facecolor=SAFE_BACKGROUND, pad_inches=0)
                     plt.close(fig)
                     
-                    # Resize về chuẩn ResNet
                     Image.open(fname).convert('RGB').resize((224, 224)).save(fname)
                     
                 except Exception:
-                    # [GIẢI PHÁP 4]: Lỗi tính toán/Toán học -> Đen tuyệt đối
-                    Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8)).save(fname)
                     plt.close()
+                    continue
+
+            # BƯỚC TÍCH HỢP TỪ SPLIT_DATASET: Kiểm tra lại ảnh
+            if os.path.exists(fname):
+                try:
+                    img_arr = np.array(Image.open(fname).convert('RGB'))
+                    if np.sum(img_arr) > 0:  # Không phải đen tuyệt đối
+                        valid_rows.append(row)
+                except Exception:
+                    continue
+        
+        # Lưu file clean
+        if valid_rows:
+            df_clean = pd.DataFrame(valid_rows)
+            clean_csv_path = os.path.join(PROJECT_ROOT, f"dataset/processed/master_nodes_{domain}_clean.csv")
+            df_clean.to_csv(clean_csv_path, index=False)
+            print(f"✅ Đã dọn dẹp {domain.upper()}! Giữ lại {len(df_clean)}/{len(df)} điểm hợp lệ.")
+            print(f"📁 Đã lưu: {clean_csv_path}")
 
 if __name__ == "__main__":
     main()
