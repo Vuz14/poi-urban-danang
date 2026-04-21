@@ -33,7 +33,7 @@ python src/precompute/crop_buildings.py
 python src/data/download_poi_images.py
 2. Phân tích Dịch chuyển Miền (Domain Shift Analysis) Đo lường sự khác biệt phân phối (Rating, Price) giữa Google Maps và Foody bằng KL Divergence & Wasserstein.
 
-
+đang ở bước này
 python research_pipeline/domain_analysis.py
 
 3. Huấn luyện AI (Model Training) Huấn luyện Multimodal Encoder & Distance-Biased Transformer trên dữ liệu Google Maps.

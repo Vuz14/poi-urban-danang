@@ -48,13 +48,13 @@ class POIDataset(Dataset):
         # CHUẨN HÓA DỮ LIỆU GGMAP
         # ------------------------------------------------------------------
         if 'image_urls' in self.data.columns:
-            self.data['Image_URL'] = self.data['image_urls'].apply(
+            self.data['Image_URL'] = self.data['mage_urls'].apply(
                 lambda x: str(x).split(',')[0].strip() if pd.notna(x) and x else None
             )
 
-        self.data['RestaurantID'] = self.data.get('place_id', self.data.index)
-        self.data['District']     = self.data.get('district', self.data.get('category', 'Unknown'))
-        self.data['Category']     = self.data.get('category', 'Unknown')
+        self.data['RestaurantID'] = self.data.get('Place_id', self.data.index)
+        self.data['District']     = self.data.get('District', self.data.get('Category', 'Unknown'))
+        self.data['Category']     = self.data.get('Category', 'Unknown')
         self.data['Lat']          = self.data.get('Lat', self.data.get('lat')).astype(np.float32)
         self.data['Lon']          = self.data.get('Lon', self.data.get('lng')).astype(np.float32)
 

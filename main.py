@@ -13,7 +13,7 @@ from sklearn.neighbors import NearestNeighbors
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from requests import RequestsDependencyWarning
-
+from tqdm import tqdm
 from src.data.dataset import POIDataset, custom_collate_fn
 from src.encoder.multimodal_encoder import MultimodalEncoder, VERSION_DESC
 from src.models.building_group import BuildingGroupEncoder
@@ -50,25 +50,34 @@ LR          = 1e-4
 # HÀM ĐÁNH GIÁ CHẤT LƯỢNG EMBEDDING (KHOA HỌC)
 # =========================================================================
 def evaluate_embeddings(features, labels, k=5):
-    """
-    Tính Silhouette Score (Độ gôm cụm) và Recall@K (Khả năng truy xuất).
-    Đây là 2 chỉ số chuẩn mực nhất cho Contrastive Learning.
-    """
+    # # --- THÊM 2 DÒNG NÀY VÀO ---
+    # unique_labels = np.unique(labels) if len(labels) > 0 else []
+    # print(f"\n👉 [DEBUG] Số vector thu được: {len(features)} | Số nhãn khác nhau: {len(unique_labels)} -> {unique_labels}")
+    # ---------------------------
     if len(features) < 2 or len(np.unique(labels)) < 2:
         return 0.0, 0.0
 
     features = np.array(features)
     labels = np.array(labels)
 
-    # 1. Tính Silhouette Score (metric='cosine' vì dùng InfoNCE)
+    # Nếu có giá trị NaN (Not a Number), mô hình có thể bị nổ gradient
+    if np.isnan(features).any():
+        print("⚠️ Lỗi: Features chứa giá trị NaN!")
+        return 0.0, 0.0
+
+    # 1. Tính Silhouette Score
+    sil_score = 0.0
     try:
-        sil_score = silhouette_score(features, labels, metric='cosine')
-    except:
+        # Nếu mỗi sample đều là 1 class riêng biệt thì thuật toán sẽ lỗi
+        if len(np.unique(labels)) < len(labels): 
+            sil_score = silhouette_score(features, labels, metric='cosine')
+    except Exception as e:
+        print(f"⚠️ Lỗi khi tính Silhouette: {e}")
         sil_score = 0.0
 
     # 2. Tính Recall@K
+    recall_at_k = 0.0
     try:
-        # Tìm k+1 hàng xóm gần nhất (Bỏ qua chính nó ở vị trí đầu tiên)
         n_neighbors = min(k + 1, len(features))
         nn = NearestNeighbors(n_neighbors=n_neighbors, metric='cosine')
         nn.fit(features)
@@ -77,17 +86,16 @@ def evaluate_embeddings(features, labels, k=5):
         hits = 0
         for i in range(len(features)):
             query_label = labels[i]
-            # Các nhãn của k hàng xóm gần nhất (không tính chính nó)
             neighbor_labels = [labels[j] for j in indices[i][1:]]
             if query_label in neighbor_labels:
                 hits += 1
         
         recall_at_k = hits / len(features)
-    except:
+    except Exception as e:
+        print(f"⚠️ Lỗi khi tính Recall: {e}")
         recall_at_k = 0.0
 
     return sil_score, recall_at_k
-
 def _encode_neighbor_groups(neighbor_list, multimodal_encoder, group_encoder, device, transform):
     neg_groups_list = []
     if not neighbor_list: return neg_groups_list
@@ -122,7 +130,7 @@ def _encode_neighbor_groups(neighbor_list, multimodal_encoder, group_encoder, de
         if len(neg_feats) < GROUP_SIZE: break
             
         dist_neg  = haversine_matrix_torch(neg_coords)
-        neg_group = group_encoder(neg_feats.unsqueeze(0), dist_neg).mean(dim=1)
+        neg_group = group_encoder(neg_feats.unsqueeze(0), dist_neg)
         neg_groups_list.append(neg_group)
 
     return neg_groups_list
@@ -162,8 +170,8 @@ def train_urban_ai():
         geom_image_dir      = TEST_GEOM_DIR,
     )
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True, pin_memory=True, collate_fn=custom_collate_fn, num_workers=4)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, drop_last=False, pin_memory=True, collate_fn=custom_collate_fn, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True, pin_memory=True, collate_fn=custom_collate_fn, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, drop_last=False, pin_memory=True, collate_fn=custom_collate_fn, num_workers=0)
 
     multimodal_encoder = MultimodalEncoder(version=TRAINING_VERSION).to(device)
     group_encoder      = BuildingGroupEncoder(embed_dim=64, num_heads=4).to(device)
@@ -187,7 +195,7 @@ def train_urban_ai():
     log_data = []
     best_test_loss = float('inf')
     best_epoch = 1
-
+    
     for epoch in range(NUM_EPOCHS):
         current_lr = optimizer.param_groups[0]['lr']
 
@@ -197,25 +205,24 @@ def train_urban_ai():
         total_train_loss, num_train_batches = 0.0, 0
         
         train_features, train_labels = [], []
-
-        for batch_idx, batch in enumerate(train_loader):
+        train_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS} [Train]")
+        for batch_idx, batch in enumerate(train_bar):
             optimizer.zero_grad()
             poi_data = batch['poi']
             coords      = poi_data['coords'].to(device, non_blocking=True)
             images      = poi_data['image'].to(device, non_blocking=True) if isinstance(poi_data['image'], torch.Tensor) else poi_data['image']
             geom_images = poi_data['geom_image'].to(device, non_blocking=True)
             texts       = poi_data['text']
-
             poi_features = multimodal_encoder(geom_images=geom_images, images=images, texts=texts)
             if poi_features.shape[0] < GROUP_SIZE * 2: continue
 
             anchor_feats  = poi_features[:GROUP_SIZE]
             anchor_coords = coords[:GROUP_SIZE]
             dist_anchor   = haversine_matrix_torch(anchor_coords)
-            anchor_group  = group_encoder(anchor_feats.unsqueeze(0), dist_anchor).mean(dim=1)
+            anchor_group  = group_encoder(anchor_feats.unsqueeze(0), dist_anchor)
 
             noise = torch.randn_like(anchor_feats) * 0.15
-            positive_group = group_encoder((anchor_feats + noise).unsqueeze(0), dist_anchor).mean(dim=1)
+            positive_group = group_encoder((anchor_feats + noise).unsqueeze(0), dist_anchor)
 
             neg_groups_list = []
             anchor_centroid = anchor_coords.mean(dim=0, keepdim=True)
@@ -234,7 +241,7 @@ def train_urban_ai():
                     n_feats = h_feats_all[i*GROUP_SIZE : (i+1)*GROUP_SIZE]
                     n_coords = h_coords_all[i*GROUP_SIZE : (i+1)*GROUP_SIZE]
                     dist_n = haversine_matrix_torch(n_coords)
-                    n_group = group_encoder(n_feats.unsqueeze(0), dist_n).mean(dim=1)
+                    n_group = group_encoder(n_feats.unsqueeze(0), dist_n)
                     neg_groups_list.append(n_group)
 
             anchor_poi_id = poi_data['poi_id'][0]
@@ -249,9 +256,14 @@ def train_urban_ai():
 
             if len(neg_groups_list) > 0:
                 negative_groups = torch.cat(neg_groups_list, dim=0)
-                
+                if anchor_group.dim() == 1:
+                    anchor_group = anchor_group.unsqueeze(0)
                 anchor_group = F.normalize(anchor_group, p=2, dim=1)
+                if positive_group.dim() == 1:
+                    positive_group = positive_group.unsqueeze(0)
                 positive_group = F.normalize(positive_group, p=2, dim=1)
+                if negative_groups.dim() == 1:
+                    negative_groups = negative_groups.unsqueeze(0)
                 negative_groups = F.normalize(negative_groups, p=2, dim=1)
                 
                 # Thu thập Feature và Label để tính Silhouette & Recall
@@ -266,7 +278,7 @@ def train_urban_ai():
 
                 total_train_loss += loss.item()
                 num_train_batches += 1
-
+                train_bar.set_postfix({"Loss": f"{loss.item():.4f}"})
         avg_train_loss = total_train_loss / max(num_train_batches, 1)
         tr_sil, tr_r5 = evaluate_embeddings(train_features, train_labels, k=5)
 
@@ -275,7 +287,7 @@ def train_urban_ai():
         group_encoder.eval()
         total_test_loss, num_test_batches = 0.0, 0
         test_features, test_labels = [], []
-
+        print("Đã forward model xong!")
         with torch.no_grad():
             for batch in test_loader:
                 poi_data = batch['poi']
@@ -290,8 +302,8 @@ def train_urban_ai():
                 anchor_feats  = poi_features[:GROUP_SIZE]
                 anchor_coords = coords[:GROUP_SIZE]
                 dist_anchor   = haversine_matrix_torch(anchor_coords)
-                anchor_group  = group_encoder(anchor_feats.unsqueeze(0), dist_anchor).mean(dim=1)
-                positive_group = group_encoder(anchor_feats.unsqueeze(0), dist_anchor).mean(dim=1)
+                anchor_group  = group_encoder(anchor_feats.unsqueeze(0), dist_anchor)
+                positive_group = group_encoder(anchor_feats.unsqueeze(0), dist_anchor)
 
                 neg_groups_list = []
                 anchor_centroid = anchor_coords.mean(dim=0, keepdim=True)
@@ -308,14 +320,22 @@ def train_urban_ai():
                         n_feats = h_feats_all[i*GROUP_SIZE : (i+1)*GROUP_SIZE]
                         n_coords = h_coords_all[i*GROUP_SIZE : (i+1)*GROUP_SIZE]
                         dist_n = haversine_matrix_torch(n_coords)
-                        n_group = group_encoder(n_feats.unsqueeze(0), dist_n).mean(dim=1)
+                        n_group = group_encoder(n_feats.unsqueeze(0), dist_n)
                         neg_groups_list.append(n_group)
 
                 if len(neg_groups_list) > 0:
                     negative_groups = torch.cat(neg_groups_list, dim=0)
                     
+                    if anchor_group.dim() == 1:
+                        anchor_group = anchor_group.unsqueeze(0)
                     anchor_group = F.normalize(anchor_group, p=2, dim=1)
+                    
+                    if positive_group.dim() == 1:
+                        positive_group = positive_group.unsqueeze(0)
                     positive_group = F.normalize(positive_group, p=2, dim=1)
+                    
+                    if negative_groups.dim() == 1:
+                        negative_groups = negative_groups.unsqueeze(0)
                     negative_groups = F.normalize(negative_groups, p=2, dim=1)
                     
                     # Thu thập Feature và Label
@@ -396,7 +416,7 @@ def plot_tsne_clusters():
     transform = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor(), transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
     
     test_dataset = POIDataset(csv_file=TEST_CSV, image_transform=transform, image_dir=TEST_IMAGE_DIR, geom_image_dir=TEST_GEOM_DIR)
-    tsne_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=custom_collate_fn, num_workers=4)
+    tsne_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=custom_collate_fn, num_workers=0)
 
     all_features, all_categories = [], []
     model.eval()
