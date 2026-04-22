@@ -13,6 +13,7 @@ THAY ĐỔI SO VỚI PHIÊN BẢN CŨ:
   - Output dimension luôn là embed_dim (64) bất kể version.
 """
 
+import os
 import torch
 import torch.nn as nn
 from torchvision.models import resnet50, ResNet50_Weights
@@ -27,6 +28,22 @@ VERSION_DESC = {
     3: "V3: Không gian + Image",
     4: "V4: Full (Không gian + Text + Image)",
 }
+def _resolve_clip_source():
+    model_id = "openai/clip-vit-base-patch32"
+    hub_root = os.path.expanduser("~/.cache/huggingface/hub")
+    snapshots_root = os.path.join(hub_root, "models--openai--clip-vit-base-patch32", "snapshots")
+    if os.path.isdir(snapshots_root):
+        for snapshot_name in sorted(os.listdir(snapshots_root), reverse=True):
+            snapshot_path = os.path.join(snapshots_root, snapshot_name)
+            has_weights = any(
+                os.path.exists(os.path.join(snapshot_path, filename))
+                for filename in ("model.safetensors", "pytorch_model.bin")
+            )
+            has_config = os.path.exists(os.path.join(snapshot_path, "config.json"))
+            if has_weights and has_config:
+                return snapshot_path
+    return model_id
+
 class MultimodalEncoder(nn.Module):
     """
     Mô hình Đa phương thức hỗ trợ Zero-shot Domain Adaptation.
@@ -51,8 +68,10 @@ class MultimodalEncoder(nn.Module):
         # 2. VĂN BẢN & HÌNH ẢNH (CLIP)
         # ==========================================
         if self.version in [2, 3, 4]:
-            self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-            self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+            clip_source = _resolve_clip_source()
+            local_only = os.path.isdir(clip_source)
+            self.clip_model = CLIPModel.from_pretrained(clip_source, local_files_only=local_only)
+            self.clip_processor = CLIPProcessor.from_pretrained(clip_source, local_files_only=local_only)
             
             # Đóng băng CLIP (chỉ dùng làm Feature Extractor)
             for param in self.clip_model.parameters():
@@ -67,7 +86,13 @@ class MultimodalEncoder(nn.Module):
         # 3. FUSION MODULE (Gated Fusion Nâng cấp)
         # ==========================================
         if self.version == 4:
-            self.fusion_proj = nn.Linear(embed_dim * 3, embed_dim)
+            self.fusion_proj = nn.Sequential(
+                nn.Linear(embed_dim * 3, embed_dim * 2),
+                nn.BatchNorm1d(embed_dim * 2),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(embed_dim * 2, embed_dim)
+            )
             # Cổng Gated Fusion: Học cách ưu tiên Modality nào đáng tin cậy hơn
             self.gate = nn.Sequential(
                 nn.Linear(self.embed_dim * 3, self.embed_dim * 3),
