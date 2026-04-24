@@ -10,7 +10,7 @@ THAY ĐỔI SO VỚI PHIÊN BẢN CŨ:
             Version 2 : Không gian + Text
             Version 3 : Không gian + Image
             Version 4 : Full (Không gian + Text + Image) ← Mặc định
-  - Output dimension luôn là embed_dim (64) bất kể version.
+  - Output dimension luôn là embed_dim bất kể version.
 """
 
 import os
@@ -19,7 +19,7 @@ import torch.nn as nn
 from torchvision.models import resnet50, ResNet50_Weights
 from transformers import CLIPModel, CLIPProcessor
 from PIL import Image
-from typing import Optional, List, Union  # <--- CHỈ CẦN THÊM DÒNG NÀY VÀO ĐÂY
+from typing import Optional, List, Union
 
 
 VERSION_DESC = {
@@ -28,6 +28,7 @@ VERSION_DESC = {
     3: "V3: Không gian + Image",
     4: "V4: Full (Không gian + Text + Image)",
 }
+
 def _resolve_clip_source():
     model_id = "openai/clip-vit-base-patch32"
     hub_root = os.path.expanduser("~/.cache/huggingface/hub")
@@ -86,6 +87,7 @@ class MultimodalEncoder(nn.Module):
         # 3. FUSION MODULE (Gated Fusion Nâng cấp)
         # ==========================================
         if self.version == 4:
+            
             self.fusion_proj = nn.Sequential(
                 nn.Linear(embed_dim * 3, embed_dim * 2),
                 nn.BatchNorm1d(embed_dim * 2),
@@ -93,15 +95,22 @@ class MultimodalEncoder(nn.Module):
                 nn.Dropout(0.2),
                 nn.Linear(embed_dim * 2, embed_dim)
             )
-            # Cổng Gated Fusion: Học cách ưu tiên Modality nào đáng tin cậy hơn
+            # Cổng Gated Fusion Độc lập (Independent Gating dùng Sigmoid)
             self.gate = nn.Sequential(
-                nn.Linear(self.embed_dim * 3, self.embed_dim * 3),
+                nn.Linear(self.embed_dim * 3, self.embed_dim), # Ép nhỏ lại để học đặc trưng tốt hơn
                 nn.ReLU(),
-                nn.Linear(self.embed_dim * 3, 3), # 3 cổng tương ứng: Spatial, Text, Image
-                nn.Softmax(dim=-1)
+                nn.Linear(self.embed_dim, 3), # 3 cổng tương ứng: Spatial, Text, Image
+                nn.Sigmoid() 
             )
         elif self.version in [2, 3]:
-            self.fusion_proj = nn.Linear(embed_dim * 2, embed_dim)
+            # Đã vá lỗi Mode Collapse bằng MLP + BatchNorm
+            self.fusion_proj = nn.Sequential(
+                nn.Linear(embed_dim * 2, int(embed_dim * 1.5)),
+                nn.BatchNorm1d(int(embed_dim * 1.5)),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(int(embed_dim * 1.5), embed_dim)
+            )
 
     def _get_version_name(self):
         if self.version == 1: return "Chỉ Không gian (ResNet)"
@@ -144,10 +153,20 @@ class MultimodalEncoder(nn.Module):
             return self.fusion_proj(concat_feats)
             
         elif self.version == 4:
-            # Dùng Gated Fusion thông minh
+            # --- MODALITY DROPOUT (Chỉ chạy lúc Train) ---
+            if self.training:
+                # 15% xác suất tắt Ảnh (ép mô hình dùng Text & Geom)
+                if torch.rand(1).item() < 0.15:
+                    image_features = torch.zeros_like(image_features)
+                # 15% xác suất tắt Text (ép mô hình phải học cách nhìn Ảnh)
+                if torch.rand(1).item() < 0.15:
+                    text_features = torch.zeros_like(text_features)
+            # ---------------------------------------------
+
+            # Nối các đặc trưng lại
             concat_feats = torch.cat([spatial_features, text_features, image_features], dim=-1)
             
-            # Tính trọng số Attention cho từng giác quan
+            # Tính trọng số Attention cho từng giác quan (Dùng Sigmoid độc lập)
             gates = self.gate(concat_feats) # [B, 3]
             
             # Nhân trọng số vào từng vector
@@ -155,7 +174,7 @@ class MultimodalEncoder(nn.Module):
             text_gated = text_features * gates[:, 1:2]
             image_gated = image_features * gates[:, 2:3]
             
-            # Nối lại và chiếu về 64 chiều cuối cùng
+            # Nối lại và chiếu về không gian nhúng cuối cùng
             fused_concat = torch.cat([spatial_gated, text_gated, image_gated], dim=-1)
             final_features = self.fusion_proj(fused_concat)
             

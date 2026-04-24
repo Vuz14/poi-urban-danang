@@ -2,7 +2,7 @@
 import os
 
 # --- CẤU HÌNH PHIÊN BẢN ---
-VERSIONS_TO_TRAIN = [1,2,3] 
+VERSIONS_TO_TRAIN = [4] 
 
 # --- ĐƯỜNG DẪN DỮ LIỆU ---
 TRAIN_CSV       = "dataset/processed/master_nodes_google_maps_clean.csv" 
@@ -24,6 +24,6 @@ TEMPERATURE = 0.1
 MARGIN      = 0.02
 LR          = 1e-4
 POSITIVE_NOISE_STD = 0.35
-POSITIVE_FEATURE_DROPOUT = 0.15
+POSITIVE_FEATURE_DROPOUT = 0.2
 DATA_LOADER_WORKERS = 4
 MIN_GROUP_PURITY = 0.5
