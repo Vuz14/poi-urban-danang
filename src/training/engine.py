@@ -11,14 +11,91 @@ from config import *
 from src.data.dataset import POIDataset, custom_collate_fn
 from src.encoder.multimodal_encoder import MultimodalEncoder, VERSION_DESC
 from src.models.building_group import BuildingGroupEncoder
-from src.models.loss_functions import MarginInfoNCELoss
-from utlis.geo_utils import _select_spatial_group_indices, haversine_matrix_torch, _build_positive_group, _build_negative_groups_from_batch
+from src.models.loss_functions import SemanticAwareContrastiveLoss
+from utlis.geo_utils import (
+    _normalize_label,
+    _resolve_group_label_info,
+    _select_spatial_group_indices,
+    haversine_matrix_torch,
+    _build_positive_group,
+    _build_negative_groups_from_batch,
+)
 from research_pipeline.evaluator import _compute_epoch_retrieval_metrics
 
 def _contrast_stats(anchor_group, positive_group, negative_groups):
     pos_sim = F.cosine_similarity(anchor_group, positive_group, dim=-1).mean().item()
     neg_sim = F.cosine_similarity(anchor_group.unsqueeze(1), negative_groups.unsqueeze(0), dim=-1).mean().item()
     return pos_sim, neg_sim
+
+def _encode_category_labels(categories, label_to_id):
+    ids = []
+    for category in categories:
+        label = _normalize_label(category)
+        if label == "Unknown":
+            ids.append(-1)
+            continue
+        if label not in label_to_id:
+            label_to_id[label] = len(label_to_id)
+        ids.append(label_to_id[label])
+    return torch.tensor(ids, dtype=torch.long)
+
+def _select_semantic_spatial_group_indices(coords, categories, group_size):
+    labels = [_normalize_label(cat) for cat in categories]
+    best_indices, best_score = None, None
+
+    for label in sorted(set(labels)):
+        if label == "Unknown":
+            continue
+        candidate_indices = [idx for idx, cat in enumerate(labels) if cat == label]
+        if len(candidate_indices) < group_size:
+            continue
+
+        group_indices = _select_spatial_group_indices(coords, group_size, candidate_indices=candidate_indices)
+        if group_indices is None:
+            continue
+        group_coords = coords[group_indices]
+        score = torch.cdist(group_coords, group_coords).mean().item()
+        if best_score is None or score < best_score:
+            best_indices, best_score = group_indices, score
+
+    return best_indices if best_indices is not None else _select_spatial_group_indices(coords, group_size)
+
+def _build_semantic_negative_weights(categories, anchor_indices, negative_group_indices):
+    anchor_label, anchor_purity = _resolve_group_label_info(categories, anchor_indices)
+    weights = []
+    for group_indices in negative_group_indices:
+        neg_label, neg_purity = _resolve_group_label_info(categories, group_indices)
+        is_hard_semantic_negative = (
+            anchor_label != "Unknown"
+            and neg_label != "Unknown"
+            and anchor_label != neg_label
+            and anchor_purity >= MIN_GROUP_PURITY
+            and neg_purity >= MIN_GROUP_PURITY
+        )
+        weights.append(2.5 if is_hard_semantic_negative else 1.0)
+    return weights
+
+def _build_negative_groups_with_indices(poi_features, coords, group_encoder, anchor_indices):
+    remaining = torch.arange(coords.shape[0], device=coords.device)
+    remaining = remaining[~torch.isin(remaining, anchor_indices)]
+    neg_groups_list, neg_indices_list = [], []
+    anchor_centroid = coords[anchor_indices].mean(dim=0)
+
+    while remaining.numel() >= GROUP_SIZE:
+        neg_indices = _select_spatial_group_indices(
+            coords, GROUP_SIZE, candidate_indices=remaining, reference_coord=anchor_centroid
+        )
+        if neg_indices is None:
+            break
+
+        neg_feats = poi_features[neg_indices]
+        neg_coords = coords[neg_indices]
+        dist_neg = haversine_matrix_torch(neg_coords)
+        neg_group = group_encoder(neg_feats.unsqueeze(0), dist_neg)
+        neg_groups_list.append(neg_group)
+        neg_indices_list.append(neg_indices)
+        remaining = remaining[~torch.isin(remaining, neg_indices)]
+    return neg_groups_list, neg_indices_list
 
 def train_urban_ai(version, out_paths):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -41,7 +118,8 @@ def train_urban_ai(version, out_paths):
 
     multimodal_encoder = MultimodalEncoder(embed_dim=EMBEDDING_DIM, version=version).to(device)
     group_encoder      = BuildingGroupEncoder(embed_dim=EMBEDDING_DIM, num_heads=4).to(device)
-    criterion = MarginInfoNCELoss(temperature=TEMPERATURE, margin=MARGIN).to(device)
+    criterion = SemanticAwareContrastiveLoss(temperature=TEMPERATURE, margin=MARGIN).to(device)
+    label_to_id = {}
 
     optim_params = [
         {'params': multimodal_encoder.resnet.parameters(), 'lr': LR * 0.1},
@@ -60,6 +138,8 @@ def train_urban_ai(version, out_paths):
         optim_params.append({'params': multimodal_encoder.fusion_proj.parameters(), 'lr': LR})
     if hasattr(multimodal_encoder, 'gate'):
         optim_params.append({'params': multimodal_encoder.gate.parameters(), 'lr': LR * 0.5})
+    if hasattr(multimodal_encoder, 'modality_prior'):
+        optim_params.append({'params': [multimodal_encoder.modality_prior], 'lr': LR * 0.5})
 
     optimizer = optim.Adam(optim_params, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.5)
@@ -86,11 +166,12 @@ def train_urban_ai(version, out_paths):
             images      = poi_data['image'].to(device, non_blocking=True) if isinstance(poi_data['image'], torch.Tensor) else poi_data['image']
             geom_images = poi_data['geom_image'].to(device, non_blocking=True)
             texts       = poi_data['text']
+            categories  = poi_data['category']
 
             poi_features = multimodal_encoder(geom_images=geom_images, images=images, texts=texts)
             if poi_features.shape[0] < GROUP_SIZE * 2: continue
 
-            anchor_indices = _select_spatial_group_indices(coords, GROUP_SIZE)
+            anchor_indices = _select_semantic_spatial_group_indices(coords, categories, GROUP_SIZE)
             if anchor_indices is None: continue
 
             anchor_feats  = poi_features[anchor_indices]
@@ -99,7 +180,7 @@ def train_urban_ai(version, out_paths):
             anchor_group  = group_encoder(anchor_feats.unsqueeze(0), dist_anchor)
             positive_group = _build_positive_group(anchor_feats, dist_anchor, group_encoder)
 
-            neg_groups_list = _build_negative_groups_from_batch(poi_features, coords, group_encoder, anchor_indices)
+            neg_groups_list, neg_indices_list = _build_negative_groups_with_indices(poi_features, coords, group_encoder, anchor_indices)
 
             # Tắt phần quét Pandas (Hard Negative) để giải phóng CPU/IO
             # anchor_poi_id = poi_data['poi_id'][int(anchor_indices[0].item())]
@@ -120,8 +201,21 @@ def train_urban_ai(version, out_paths):
                 positive_group = F.normalize(positive_group, p=2, dim=1)
                 if negative_groups.dim() == 1: negative_groups = negative_groups.unsqueeze(0)
                 negative_groups = F.normalize(negative_groups, p=2, dim=1)
-                
-                loss = criterion(anchor_group, positive_group, negative_groups)
+
+                category_labels = _encode_category_labels(categories, label_to_id).to(device)
+                negative_weights = torch.tensor(
+                    _build_semantic_negative_weights(categories, anchor_indices, neg_indices_list),
+                    dtype=torch.float32,
+                    device=device,
+                )
+                loss = criterion(
+                    anchor_group,
+                    positive_group,
+                    negative_groups,
+                    batch_features=poi_features,
+                    category_labels=category_labels,
+                    negative_weights=negative_weights,
+                )
                 pos_sim, neg_sim = _contrast_stats(anchor_group, positive_group, negative_groups)
                 loss.backward()
                 optimizer.step()
@@ -150,11 +244,12 @@ def train_urban_ai(version, out_paths):
                 images      = poi_data['image'].to(device, non_blocking=True) if isinstance(poi_data['image'], torch.Tensor) else poi_data['image']
                 geom_images = poi_data['geom_image'].to(device, non_blocking=True)
                 texts       = poi_data['text']
+                categories  = poi_data['category']
 
                 poi_features = multimodal_encoder(geom_images=geom_images, images=images, texts=texts)
                 if poi_features.shape[0] < GROUP_SIZE * 2: continue
 
-                anchor_indices = _select_spatial_group_indices(coords, GROUP_SIZE)
+                anchor_indices = _select_semantic_spatial_group_indices(coords, categories, GROUP_SIZE)
                 if anchor_indices is None: continue
 
                 anchor_feats  = poi_features[anchor_indices]
@@ -163,7 +258,7 @@ def train_urban_ai(version, out_paths):
                 anchor_group  = group_encoder(anchor_feats.unsqueeze(0), dist_anchor)
                 positive_group = _build_positive_group(anchor_feats, dist_anchor, group_encoder)
 
-                neg_groups_list = _build_negative_groups_from_batch(poi_features, coords, group_encoder, anchor_indices)
+                neg_groups_list, neg_indices_list = _build_negative_groups_with_indices(poi_features, coords, group_encoder, anchor_indices)
 
                 if len(neg_groups_list) > 0:
                     negative_groups = torch.cat(neg_groups_list, dim=0)
@@ -173,8 +268,21 @@ def train_urban_ai(version, out_paths):
                     positive_group = F.normalize(positive_group, p=2, dim=1)
                     if negative_groups.dim() == 1: negative_groups = negative_groups.unsqueeze(0)
                     negative_groups = F.normalize(negative_groups, p=2, dim=1)
-                    
-                    test_loss = criterion(anchor_group, positive_group, negative_groups)
+
+                    category_labels = _encode_category_labels(categories, label_to_id).to(device)
+                    negative_weights = torch.tensor(
+                        _build_semantic_negative_weights(categories, anchor_indices, neg_indices_list),
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    test_loss = criterion(
+                        anchor_group,
+                        positive_group,
+                        negative_groups,
+                        batch_features=poi_features,
+                        category_labels=category_labels,
+                        negative_weights=negative_weights,
+                    )
                     pos_sim, neg_sim = _contrast_stats(anchor_group, positive_group, negative_groups)
                     total_test_loss += test_loss.item()
                     total_test_pos_sim += pos_sim

@@ -3,6 +3,9 @@ import pandas as pd
 import folium
 from streamlit_folium import st_folium
 import os
+import re
+import sys
+import unicodedata
 from PIL import Image
 
 # ==========================================
@@ -19,12 +22,72 @@ st.set_page_config(
 # ==========================================
 @st.cache_data
 def load_data():
-    file_path = "dataset/processed/poi_processed_data.csv"
+    file_path = "dataset/processed/poi_processed_gmap.csv"
     if os.path.exists(file_path):
         return pd.read_csv(file_path)
     return None
 
 df = load_data()
+
+CATEGORY_INTENT_KEYWORDS = {
+    "cafe": {
+        "category_terms": ["cafe", "café", "coffee", "ca phe", "dessert", "tra sua"],
+        "query_terms": ["cafe", "café", "coffee", "ca phe", "cà phê", "dessert", "trà sữa", "tra sua"],
+    },
+    "restaurant": {
+        "category_terms": ["nha hang", "restaurant"],
+        "query_terms": ["nha hang", "nhà hàng", "restaurant", "fine dining"],
+    },
+    "food": {
+        "category_terms": ["quan an", "an vat", "via he", "food"],
+        "query_terms": ["quan an", "quán ăn", "an vat", "ăn vặt", "via he", "vỉa hè", "mon an", "món ăn"],
+    },
+    "pub": {
+        "category_terms": ["quan nhau", "bia", "beer", "nhau"],
+        "query_terms": ["quan nhau", "quán nhậu", "bia", "beer", "nhau", "nhậu"],
+    },
+    "seafood": {
+        "category_terms": ["hai san", "seafood"],
+        "query_terms": ["hai san", "hải sản", "seafood"],
+    },
+}
+
+def normalize_text(value):
+    text = "" if value is None else str(value).lower()
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    return text.replace("đ", "d")
+
+def infer_query_intents(query):
+    query_norm = normalize_text(query)
+    intents = []
+    for intent, spec in CATEGORY_INTENT_KEYWORDS.items():
+        if any(re.search(rf"\b{re.escape(normalize_text(term))}\b", query_norm) for term in spec["query_terms"]):
+            intents.append(intent)
+    return intents
+
+def category_matches_intent(category, intents):
+    if not intents:
+        return True
+    category_norm = normalize_text(category)
+    for intent in intents:
+        terms = CATEGORY_INTENT_KEYWORDS[intent]["category_terms"]
+        if any(normalize_text(term) in category_norm for term in terms):
+            return True
+    return False
+
+def semantic_rerank_scores(similarities, poi_df, query, match_bonus=0.18, mismatch_penalty=0.42):
+    intents = infer_query_intents(query)
+    if not intents:
+        return similarities, intents
+
+    penalties = []
+    for _, row in poi_df.iterrows():
+        is_match = category_matches_intent(row.get("Category", ""), intents)
+        penalties.append(match_bonus if is_match else -mismatch_penalty)
+
+    semantic_adjustment = similarities.new_tensor(penalties)
+    return similarities + semantic_adjustment, intents
 
 # ==========================================
 # GIAO DIỆN CHÍNH
@@ -168,11 +231,14 @@ with tab4:
                 import torch
                 from PIL import Image
                 from torchvision import transforms
+                src_path = os.path.abspath(os.path.join(os.getcwd(), "src"))
+                if src_path not in sys.path:
+                    sys.path.insert(0, src_path)
                 from encoder.multimodal_encoder import MultimodalEncoder
                 import torch.nn.functional as F
                 
                 device = "cuda" if torch.cuda.is_available() else "cpu"
-                model_path = os.path.abspath(os.path.join(os.getcwd(), "models_saved", "multimodal_best.pth"))
+                model_path = os.path.abspath(os.path.join(os.getcwd(), "result/v4/models_saved", "multimodal_encoder_final.pth"))
                 
                 if not os.path.exists(model_path):
                     st.error(f"❌ Khẩn cấp: Không tìm thấy file trọng số AI tại:\n`{model_path}`")
@@ -196,10 +262,10 @@ with tab4:
                     img_pil = Image.open(uploaded_file).convert("RGB")
                     concept_img_tensor = transform(img_pil).unsqueeze(0).to(device)
                 else:
-                    concept_img_tensor = torch.zeros((1, 3, 224, 224), dtype=torch.float32).to(device)
+                    concept_img_tensor = None
 
                 with torch.no_grad():
-                    concept_feature = model(images=concept_img_tensor, texts=[user_concept]) 
+                    concept_feature = model(geom_images=None, images=concept_img_tensor, texts=[user_concept]) 
                 
                 all_texts = df['LLM_Input_Text'].tolist()
                 all_poi_features = []
@@ -207,18 +273,20 @@ with tab4:
                 
                 for i in range(0, len(all_texts), batch_size):
                     batch_texts = all_texts[i:i+batch_size]
-                    dummy_imgs = torch.zeros((len(batch_texts), 3, 224, 224), dtype=torch.float32).to(device)
-                    
                     with torch.no_grad():
-                        feats = model(images=dummy_imgs, texts=batch_texts)
+                        feats = model(geom_images=None, images=None, texts=batch_texts)
                         all_poi_features.append(feats)
                 
                 all_poi_features = torch.cat(all_poi_features, dim=0)
                 similarities = F.cosine_similarity(concept_feature, all_poi_features, dim=-1)
+                final_scores, query_intents = semantic_rerank_scores(similarities, df, user_concept)
                 
                 # BÍ KÍP: Lưu Top 5 kết quả vào Session State (Bộ nhớ tạm của Web)
-                st.session_state['ai_top_idx'] = torch.topk(similarities, 5).indices.cpu().numpy()
-                st.session_state['ai_top_scores'] = torch.topk(similarities, 5).values.cpu().numpy()
+                topk = torch.topk(final_scores, 5)
+                st.session_state['ai_top_idx'] = topk.indices.cpu().numpy()
+                st.session_state['ai_top_scores'] = similarities[topk.indices].cpu().numpy()
+                st.session_state['ai_final_scores'] = topk.values.cpu().numpy()
+                st.session_state['ai_query_intents'] = query_intents
                 
             except Exception as e:
                 st.error(f"⚠️ Có lỗi xảy ra trong quá trình tính toán AI: {e}")
@@ -229,19 +297,24 @@ with tab4:
         
         top_5_idx = st.session_state['ai_top_idx']
         top_5_scores = st.session_state['ai_top_scores']
+        top_5_final_scores = st.session_state.get('ai_final_scores', top_5_scores)
+        query_intents = st.session_state.get('ai_query_intents', [])
+        if query_intents:
+            st.caption(f"Semantic intent detected: {', '.join(query_intents)}")
         
         m_recommend = folium.Map(location=[16.0544, 108.2022], zoom_start=13, tiles='CartoDB positron')
         
-        for rank, (idx, score) in enumerate(zip(top_5_idx, top_5_scores)):
+        for rank, (idx, score, final_score) in enumerate(zip(top_5_idx, top_5_scores, top_5_final_scores)):
             poi = df.iloc[idx]
             
-            st.markdown(f"**Top {rank+1}: Khu vực gần `{poi['Restaurant Name']}` (Độ phù hợp: {score*100:.1f}%)**")
+            st.markdown(f"**Top {rank+1}: Khu vực gần `{poi['Restaurant Name']}` (Độ phù hợp: {final_score*100:.1f}%)**")
             st.write(f"- 📍 Vị trí: {poi['District']}")
+            st.write(f"- Danh mục: {poi['Category']} | Cosine gốc: {score*100:.1f}%")
             st.write(f"- 🔎 Đặc trưng khu vực: {poi['LLM_Input_Text'][:150]}...")
             
             folium.Marker(
                 location=[poi['Lat'], poi['Lon']],
-                popup=f"Vị trí đề xuất Top {rank+1}<br>Độ phù hợp: {score*100:.1f}%",
+                popup=f"Vị trí đề xuất Top {rank+1}<br>Độ phù hợp: {final_score*100:.1f}%",
                 icon=folium.Icon(color='red', icon='star')
             ).add_to(m_recommend)
             

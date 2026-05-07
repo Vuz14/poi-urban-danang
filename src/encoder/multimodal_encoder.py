@@ -14,8 +14,10 @@ THAY ĐỔI SO VỚI PHIÊN BẢN CŨ:
 """
 
 import os
+import re
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision.models import resnet50, ResNet50_Weights
 from transformers import CLIPModel, CLIPProcessor
 from PIL import Image
@@ -87,7 +89,8 @@ class MultimodalEncoder(nn.Module):
         # 3. FUSION MODULE (Gated Fusion Nâng cấp)
         # ==========================================
         if self.version == 4:
-            
+            self.modality_prior = nn.Parameter(torch.zeros(3))
+
             self.fusion_proj = nn.Sequential(
                 nn.Linear(embed_dim * 3, embed_dim * 2),
                 nn.BatchNorm1d(embed_dim * 2),
@@ -119,12 +122,16 @@ class MultimodalEncoder(nn.Module):
         if self.version == 4: return "Full Đa phương thức (Không gian + Text + Ảnh)"
         return "Unknown"
 
-    def forward(self, geom_images, images=None, texts=None):
-        batch_size = geom_images.shape[0]
-        device = geom_images.device
+    def forward(self, geom_images=None, images=None, texts=None):
+        batch_size, device = self._infer_batch_and_device(geom_images, images, texts)
 
         # 1. Luôn Trích xuất Đặc trưng Không gian
-        spatial_features = self.resnet(geom_images)  # [B, 64]
+        has_geom = geom_images is not None
+        if has_geom:
+            geom_images = geom_images.to(device)
+            spatial_features = self.resnet(geom_images)  # [B, 64]
+        else:
+            spatial_features = torch.zeros(batch_size, self.embed_dim, device=device)
 
         if self.version == 1:
             return spatial_features
@@ -134,11 +141,13 @@ class MultimodalEncoder(nn.Module):
         image_features = torch.zeros(batch_size, self.embed_dim, device=device)
 
         # 2. Trích xuất Đặc trưng Văn bản
-        if self.version in [2, 4] and texts is not None:
+        has_text = texts is not None and len(texts) > 0 and any(str(t).strip() for t in texts)
+        if self.version in [2, 4] and has_text:
             text_features = self._encode_clip_text(texts, device, batch_size)
 
         # 3. Trích xuất Đặc trưng Hình ảnh
-        if self.version in [3, 4] and images is not None:
+        has_image = images is not None and not self._is_zero_tensor(images)
+        if self.version in [3, 4] and has_image:
             image_features = self._encode_clip_image(images, device, batch_size)
 
         # ==========================================
@@ -158,16 +167,26 @@ class MultimodalEncoder(nn.Module):
                 # 15% xác suất tắt Ảnh (ép mô hình dùng Text & Geom)
                 if torch.rand(1).item() < 0.15:
                     image_features = torch.zeros_like(image_features)
+                    has_image = False
                 # 15% xác suất tắt Text (ép mô hình phải học cách nhìn Ảnh)
                 if torch.rand(1).item() < 0.15:
                     text_features = torch.zeros_like(text_features)
+                    has_text = False
             # ---------------------------------------------
 
             # Nối các đặc trưng lại
             concat_feats = torch.cat([spatial_features, text_features, image_features], dim=-1)
             
             # Tính trọng số Attention cho từng giác quan (Dùng Sigmoid độc lập)
-            gates = self.gate(concat_feats) # [B, 3]
+            gates = self._compute_modality_gates(
+                concat_feats=concat_feats,
+                texts=texts,
+                has_geom=has_geom,
+                has_text=has_text,
+                has_image=has_image,
+                batch_size=batch_size,
+                device=device,
+            )
             
             # Nhân trọng số vào từng vector
             spatial_gated = spatial_features * gates[:, 0:1]
@@ -179,6 +198,58 @@ class MultimodalEncoder(nn.Module):
             final_features = self.fusion_proj(fused_concat)
             
             return final_features
+
+    def _infer_batch_and_device(self, geom_images, images, texts):
+        if isinstance(geom_images, torch.Tensor):
+            return geom_images.shape[0], geom_images.device
+        if isinstance(images, torch.Tensor):
+            return images.shape[0], images.device
+        if isinstance(images, list):
+            return len(images), next(self.parameters()).device
+        if texts is not None:
+            return len(texts), next(self.parameters()).device
+        return 1, next(self.parameters()).device
+
+    def _is_zero_tensor(self, value):
+        if not isinstance(value, torch.Tensor):
+            return False
+        if value.numel() == 0:
+            return True
+        return bool(torch.count_nonzero(value.detach()).item() == 0)
+
+    def _semantic_text_strength(self, texts, batch_size, device):
+        patterns = [
+            r"\bcafe\b", r"\bcoffee\b", r"ca phe", r"dessert", r"tra sua",
+            r"nha hang", r"restaurant", r"quan an", r"an vat", r"via he",
+            r"quan nhau", r"bia", r"beer", r"hai san", r"lau", r"nuong",
+        ]
+        strengths = []
+        for text in texts or [""] * batch_size:
+            clean = self._strip_vietnamese_accents(str(text).lower())
+            matched = any(re.search(pattern, clean) for pattern in patterns)
+            strengths.append(1.0 if matched else 0.35 if clean.strip() else 0.0)
+        return torch.tensor(strengths, dtype=torch.float32, device=device).view(batch_size, 1)
+
+    def _compute_modality_gates(self, concat_feats, texts, has_geom, has_text, has_image, batch_size, device):
+        raw_gates = self.gate(concat_feats).clamp(1e-4, 1.0)
+        gate_logits = torch.log(raw_gates) + self.modality_prior.view(1, 3)
+        available = torch.tensor([has_geom, has_text, has_image], dtype=torch.bool, device=device).view(1, 3)
+        gate_logits = gate_logits.masked_fill(~available, -1e4)
+
+        if has_text:
+            gate_logits[:, 1:2] = gate_logits[:, 1:2] + 2.2 * self._semantic_text_strength(texts, batch_size, device)
+
+        if has_text and not has_geom and not has_image:
+            forced = torch.tensor([0.02, 0.96, 0.02], dtype=concat_feats.dtype, device=device)
+            return forced.view(1, 3).repeat(batch_size, 1)
+
+        return F.softmax(gate_logits, dim=1)
+
+    def _strip_vietnamese_accents(self, text):
+        src = "àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ"
+        dst = "aaaaaaaaaaaaaaaaaeeeeeeeeeeeiiiiiooooooooooooooooouuuuuuuuuuuyyyyyd"
+        table = str.maketrans(src + src.upper(), dst + dst.upper())
+        return text.translate(table)
 
     # =========================================================================
     # CÁC HÀM TRỢ GIÚP CLIP
