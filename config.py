@@ -25,5 +25,7 @@ MARGIN      = 0.02
 LR          = 1e-4
 POSITIVE_NOISE_STD = 0.35
 POSITIVE_FEATURE_DROPOUT = 0.2
-DATA_LOADER_WORKERS = 4
+# Windows multiprocessing can hide dataset exceptions as
+# "DataLoader worker exited unexpectedly". Keep this at 0 for stable runs/debugging.
+DATA_LOADER_WORKERS = 0
 MIN_GROUP_PURITY = 0.5

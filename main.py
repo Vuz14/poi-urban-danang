@@ -7,7 +7,8 @@ from config import VERSIONS_TO_TRAIN
 from src.training.engine import train_urban_ai
 from research_pipeline.visualization import (
     plot_training_loss, plot_silhouette_scores, plot_recall_at_5,
-    plot_similarity_curves, plot_tsne_clusters, plot_group_tsne_clusters, plot_umap_clusters
+    plot_similarity_curves, plot_tsne_clusters, plot_knn_confusion_matrix,
+    plot_group_tsne_clusters, plot_umap_clusters
 )
 
 warnings.filterwarnings("ignore", category=RequestsDependencyWarning)
@@ -46,6 +47,7 @@ if __name__ == "__main__":
         plot_recall_at_5(v, paths)
         plot_similarity_curves(v, paths)
         plot_tsne_clusters(v, paths)
+        plot_knn_confusion_matrix(v, paths)
         plot_group_tsne_clusters(v, paths)
         plot_umap_clusters(v, paths)
         

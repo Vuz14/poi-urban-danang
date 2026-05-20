@@ -4,7 +4,10 @@ import seaborn as sns
 import numpy as np
 import torch
 import torch.nn.functional as F
+from sklearn.metrics import confusion_matrix
 from sklearn.manifold import TSNE
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.neighbors import KNeighborsClassifier
 from torchvision import transforms
 from torch.utils.data import DataLoader
 
@@ -141,6 +144,54 @@ def plot_tsne_clusters(version, out_paths):
         plt.legend(bbox_to_anchor=(1.05, 1), loc=2)
         plt.savefig(f"{out_paths['figures']}/tsne_clusters_v{version}.jpg", dpi=300, bbox_inches='tight')
         plt.close()
+
+def plot_knn_confusion_matrix(version, out_paths):
+    try:
+        features, categories = _collect_group_embeddings(version, out_paths)
+        features, categories = _prepare_labeled_embeddings(features, categories, min_samples_per_class=2, drop_unknown=True)
+        labels = np.array(sorted(np.unique(categories)), dtype=object)
+
+        if len(features) <= 5 or len(labels) < 2:
+            print(f"⚠️ Không đủ dữ liệu để vẽ KNN Confusion Matrix cho Version {version}.")
+            return
+
+        class_counts = pd.Series(categories).value_counts()
+        n_splits = min(5, int(class_counts.min()))
+        if n_splits < 2 or len(features) - int(np.ceil(len(features) / n_splits)) < 5:
+            print(f"⚠️ Không đủ mẫu train trong cross-validation để chạy KNN@5 cho Version {version}.")
+            return
+
+        knn = KNeighborsClassifier(n_neighbors=5, metric='cosine')
+        cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        predicted_categories = cross_val_predict(knn, features, categories, cv=cv)
+        cm = confusion_matrix(categories, predicted_categories, labels=labels)
+
+        fig_width = max(8, min(18, 0.75 * len(labels)))
+        fig_height = max(6, min(16, 0.65 * len(labels)))
+        plt.figure(figsize=(fig_width, fig_height))
+        sns.heatmap(
+            cm,
+            annot=len(labels) <= 20,
+            fmt='d',
+            cmap='Blues',
+            xticklabels=labels,
+            yticklabels=labels,
+            cbar=True,
+            square=True,
+            linewidths=0.2,
+            linecolor='white'
+        )
+        plt.title(f"KNN@5 Confusion Matrix on Group Embeddings - {VERSION_DESC[version]}")
+        plt.xlabel("Predicted Category")
+        plt.ylabel("True Category")
+        plt.xticks(rotation=45, ha='right')
+        plt.yticks(rotation=0)
+        plt.tight_layout()
+        plt.savefig(f"{out_paths['figures']}/confusion_matrix_v{version}.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✅ Đã lưu KNN Confusion Matrix cho Version {version}.")
+    except Exception as e:
+        print(f"⚠️ Lỗi vẽ KNN Confusion Matrix: {e}")
 
 def plot_group_tsne_clusters(version, out_paths):
     try:

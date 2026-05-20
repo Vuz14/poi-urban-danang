@@ -1,5 +1,6 @@
 import os
 import random
+import builtins
 import torch
 from torch.utils.data import Dataset
 import pandas as pd
@@ -7,6 +8,14 @@ import numpy as np
 from PIL import Image
 from sklearn.neighbors import BallTree
 from sklearn.neighbors import NearestNeighbors
+
+def _safe_print(message):
+    try:
+        builtins.print(message)
+    except UnicodeEncodeError:
+        builtins.print(str(message).encode("ascii", errors="replace").decode("ascii"))
+
+print = _safe_print
 
 class POIDataset(Dataset):
     # Số lượng ảnh tối đa mỗi POI (pad ảnh đen nếu thiếu)
