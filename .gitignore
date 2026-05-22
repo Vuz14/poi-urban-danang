@@ -45,3 +45,22 @@ reports/*.html
 
 reports/
 
+cache/poi_report_extract/\[Content_Types].xml
+cache/poi_report_extract/report.zip
+cache/poi_report_extract/_rels/.rels
+cache/poi_report_extract/customXml/item1.xml
+cache/poi_report_extract/customXml/itemProps1.xml
+cache/poi_report_extract/customXml/_rels/item1.xml.rels
+cache/poi_report_extract/docProps/app.xml
+cache/poi_report_extract/docProps/core.xml
+cache/poi_report_extract/word/document.xml
+cache/poi_report_extract/word/endnotes.xml
+cache/poi_report_extract/word/fontTable.xml
+cache/poi_report_extract/word/footer1.xml
+cache/poi_report_extract/word/footnotes.xml
+cache/poi_report_extract/word/numbering.xml
+cache/poi_report_extract/word/settings.xml
+cache/poi_report_extract/word/styles.xml
+cache/poi_report_extract/word/webSettings.xml
+cache/poi_report_extract/word/_rels/document.xml.rels
+cache/poi_report_extract/word/theme/theme1.xml
