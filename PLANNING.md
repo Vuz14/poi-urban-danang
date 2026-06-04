@@ -137,6 +137,44 @@ fix(model): prioritize category match for text queries
 test(model): add scorer sanity cases
 ```
 
+## Cach chay du an AI/model
+
+### Cai dat
+
+```bash
+cd D:\poi_urban
+pip install -r requirements.txt
+```
+
+### Chay train/evaluate pipeline
+
+```bash
+python main.py
+```
+
+Ket qua mac dinh ghi vao:
+
+```text
+results/
+```
+
+### Chay Streamlit prototype
+
+```bash
+streamlit run app.py
+```
+
+### Kiem tra nhanh cac module scoring moi
+
+```bash
+python -c "from src.models.business_location_scorer import score_business_location; print('ok')"
+```
+
+### Luu y
+
+- `src/models/semantic_reranker.py`, `demand_proxy_engine.py`, `business_location_scorer.py` la module nhe de prototype scoring.
+- Backend co ban JS rieng de chay API nhanh; khi model on dinh co the dong bo cong thuc hoac export service tu repo nay.
+
 ## Cau truc thu muc sau khi don dep
 
 `	ext
