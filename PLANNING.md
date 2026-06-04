@@ -118,6 +118,63 @@ Output phai co giai thich:
 - Business opportunity sanity check.
 - Ablation V1/V2/V3/V4.
 
+## Agent representation training tu backend
+
+Backend export grounded training pairs sang:
+
+```text
+D:\POI-urban-danang-BE\data\training\agent_representation_pairs_v1.jsonl
+```
+
+Repo nay dung file do de train/evaluate reranker hoac representation model that.
+Pipeline baseline hien co:
+
+```bash
+python research_pipeline/train_agent_representation_reranker.py
+```
+
+Output:
+
+```text
+results/agent_representation/agent_representation_metrics.json
+results/agent_representation/agent_representation_metrics.png
+```
+
+Y nghia:
+
+```text
+roc_auc             Kha nang phan biet POI phu hop/khong phu hop
+average_precision   Chat luong ranking tren du lieu lech lop
+recall_at_5         Ty le POI dung nam trong top 5
+precision_at_5      Do sach cua top 5
+mrr                 POI dung dau tien xuat hien som hay muon
+```
+
+Baseline nay la buoc dau minh bach va nhanh. Buoc tiep theo la thay logistic reranker bang PyTorch
+contrastive encoder dung semantic-aware hard negative mining va SupCon.
+
+Neural representation baseline hien co:
+
+```bash
+python research_pipeline/train_agent_two_tower_representation.py
+```
+
+Output:
+
+```text
+results/agent_representation_two_tower/two_tower_metrics.json
+results/agent_representation_two_tower/two_tower_training_report.png
+results/agent_representation_two_tower/agent_two_tower_representation.pt
+```
+
+Mo hinh nay hoc hai embedding tower:
+
+```text
+user query/persona context -> query embedding
+POI semantic text + numeric signals -> POI embedding
+dot(query, poi) -> relevance
+```
+
 ## Dong goi sang backend
 
 Backend khong nen phu thuoc vao notebook/prototype. Can export:
@@ -168,6 +225,30 @@ streamlit run app.py
 
 ```bash
 python -c "from src.models.business_location_scorer import score_business_location; print('ok')"
+```
+
+### Train/evaluate agent representation baseline tu backend export
+
+Truoc tien o backend:
+
+```bash
+cd D:\POI-urban-danang-BE
+npm run export:representation-data
+```
+
+Sau do o repo nay:
+
+```bash
+cd D:\poi_urban
+python research_pipeline/train_agent_representation_reranker.py
+python research_pipeline/train_agent_two_tower_representation.py
+```
+
+Ket qua hinh anh:
+
+```text
+results/agent_representation/agent_representation_metrics.png
+results/agent_representation_two_tower/two_tower_training_report.png
 ```
 
 ### Luu y
