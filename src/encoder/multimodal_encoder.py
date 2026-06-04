@@ -86,7 +86,7 @@ class MultimodalEncoder(nn.Module):
                 self.image_projection = nn.Linear(512, embed_dim)
 
         # ==========================================
-        # 3. FUSION MODULE (Gated Fusion Nâng cấp)
+        # 3. FUSION MODULE (Gated Fusion Nâng cấp) 
         # ==========================================
         if self.version == 4:
             self.modality_prior = nn.Parameter(torch.zeros(3))

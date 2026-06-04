@@ -29,7 +29,7 @@ class MarginInfoNCELoss(nn.Module):
     """
     Hàm InfoNCE Loss có Margin - Khóa Nhiệt độ cố định để tránh AI "ăn gian"
     """
-    def __init__(self, temperature=0.1, margin=0.05): 
+    def __init__(self, temperature=0.1, margin=0.05): #
         super().__init__()
         # Trả lại giá trị cố định, KHÔNG dùng nn.Parameter nữa
         self.temperature = temperature
