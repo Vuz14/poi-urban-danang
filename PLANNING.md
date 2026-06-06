@@ -175,6 +175,15 @@ POI semantic text + numeric signals -> POI embedding
 dot(query, poi) -> relevance
 ```
 
+Loss hien tai:
+
+```text
+BCE relevance loss + supervised contrastive loss theo target_role/intent
+```
+
+Muc tieu cua SupCon la day cac positive cung intent lai gan nhau va giam loi semantic drift
+nhu query "cafe" bi keo sang "quan nhau" chi vi gan vi tri/khong gian.
+
 ## Dong goi sang backend
 
 Backend khong nen phu thuoc vao notebook/prototype. Can export:
@@ -233,6 +242,7 @@ Truoc tien o backend:
 
 ```bash
 cd D:\POI-urban-danang-BE
+npm run generate:synthetic -- --count=120
 npm run export:representation-data
 ```
 

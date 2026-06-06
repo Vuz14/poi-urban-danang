@@ -24,7 +24,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import average_precision_score, roc_auc_score
-from sklearn.model_selection import train_test_split
 
 try:
     import matplotlib.pyplot as plt
@@ -101,16 +100,28 @@ class TwoTowerDataset(torch.utils.data.Dataset):
         self.query_matrix = vectorizer.transform([query_text(record) for record in records]).astype(np.float32)
         self.poi_matrix = vectorizer.transform([poi_text(record) for record in records]).astype(np.float32)
         self.numeric = np.asarray([poi_numeric(record) for record in records], dtype=np.float32)
+        roles = sorted({str(record.get("target_role") or "unknown") for record in records if int(record.get("label") or 0) == 1})
+        self.role_to_label = {role: index for index, role in enumerate(roles)}
+        self.supcon_labels = np.asarray(
+            [
+                self.role_to_label.get(str(record.get("target_role") or "unknown"), -1)
+                if int(record.get("label") or 0) == 1
+                else -1
+                for record in records
+            ],
+            dtype=np.int64,
+        )
 
     def __len__(self) -> int:
         return len(self.records)
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         query = torch.from_numpy(self.query_matrix[index].toarray().squeeze(0))
         poi = torch.from_numpy(self.poi_matrix[index].toarray().squeeze(0))
         numeric = torch.from_numpy(self.numeric[index])
         label = torch.tensor(self.labels[index], dtype=torch.float32)
-        return query, poi, numeric, label
+        supcon_label = torch.tensor(self.supcon_labels[index], dtype=torch.long)
+        return query, poi, numeric, label, supcon_label
 
 
 class TwoTowerRepresentation(nn.Module):
@@ -130,12 +141,39 @@ class TwoTowerRepresentation(nn.Module):
         )
         self.temperature = nn.Parameter(torch.tensor(0.08))
 
-    def forward(self, query: torch.Tensor, poi: torch.Tensor, numeric: torch.Tensor) -> torch.Tensor:
+    def encode(self, query: torch.Tensor, poi: torch.Tensor, numeric: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         query_emb = F.normalize(self.query_encoder(query), p=2, dim=1)
         poi_input = torch.cat([poi, numeric], dim=1)
         poi_emb = F.normalize(self.poi_encoder(poi_input), p=2, dim=1)
+        return query_emb, poi_emb
+
+    def forward(self, query: torch.Tensor, poi: torch.Tensor, numeric: torch.Tensor) -> torch.Tensor:
+        query_emb, poi_emb = self.encode(query, poi, numeric)
         temperature = self.temperature.clamp(0.03, 0.5)
         return (query_emb * poi_emb).sum(dim=1) / temperature
+
+
+def supervised_contrastive_loss(features: torch.Tensor, labels: torch.Tensor, temperature: float = 0.12) -> torch.Tensor:
+    valid = labels >= 0
+    features = features[valid]
+    labels = labels[valid]
+    if features.shape[0] < 2:
+        return torch.zeros((), device=features.device)
+
+    features = F.normalize(features, p=2, dim=1)
+    logits = torch.matmul(features, features.T) / temperature
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+    self_mask = torch.eye(features.shape[0], dtype=torch.bool, device=features.device)
+    pos_mask = torch.eq(labels.view(-1, 1), labels.view(1, -1)) & ~self_mask
+    if not pos_mask.any():
+        return torch.zeros((), device=features.device)
+
+    exp_logits = torch.exp(logits).masked_fill(self_mask, 0.0)
+    log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True).clamp_min(1e-12))
+    pos_count = pos_mask.float().sum(dim=1).clamp_min(1.0)
+    mean_log_prob_pos = (pos_mask.float() * log_prob).sum(dim=1) / pos_count
+    valid_anchor = pos_mask.any(dim=1)
+    return -mean_log_prob_pos[valid_anchor].mean()
 
 
 def predict_scores(model: nn.Module, dataset: TwoTowerDataset) -> np.ndarray:
@@ -143,7 +181,7 @@ def predict_scores(model: nn.Module, dataset: TwoTowerDataset) -> np.ndarray:
     model.eval()
     scores: list[float] = []
     with torch.no_grad():
-        for query, poi, numeric, _ in loader:
+        for query, poi, numeric, _, _ in loader:
             logits = model(query, poi, numeric)
             scores.extend(torch.sigmoid(logits).cpu().numpy().tolist())
     return np.asarray(scores, dtype=np.float32)
@@ -185,6 +223,45 @@ def evaluate(records: list[dict[str, Any]], labels: np.ndarray, scores: np.ndarr
         metrics["roc_auc"] = 0.0
         metrics["average_precision"] = 0.0
     return metrics
+
+
+def group_key(record: dict[str, Any]) -> str:
+    return str(record.get("sample_id") or record.get("persona_id") or record.get("query") or "unknown")
+
+
+def grouped_train_test_split(
+    records: list[dict[str, Any]],
+    labels: np.ndarray,
+    test_size: float = 0.35,
+    seed: int = 42,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], np.ndarray, np.ndarray]:
+    groups: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        groups.setdefault(group_key(record), []).append(index)
+
+    rng = np.random.default_rng(seed)
+    group_names = np.asarray(sorted(groups))
+    rng.shuffle(group_names)
+
+    target_test_records = max(1, int(len(records) * test_size))
+    test_indices: list[int] = []
+    train_indices: list[int] = []
+    for name in group_names:
+        bucket = groups[str(name)]
+        if len(test_indices) < target_test_records:
+            test_indices.extend(bucket)
+        else:
+            train_indices.extend(bucket)
+
+    if not train_indices or not test_indices:
+        raise ValueError("Grouped split failed; need more synthetic groups.")
+
+    return (
+        [records[index] for index in train_indices],
+        [records[index] for index in test_indices],
+        labels[train_indices],
+        labels[test_indices],
+    )
 
 
 def plot_training(history: list[float], metrics: dict[str, Any], output_dir: Path) -> None:
@@ -267,20 +344,17 @@ def plot_training(history: list[float], metrics: dict[str, Any], output_dir: Pat
 
 def train(input_path: Path, output_dir: Path, epochs: int = 80) -> dict[str, Any]:
     set_seed()
+    print(f"[1/8] Reading grounded training pairs from {input_path}")
     raw_records = read_jsonl(input_path)
     records = [record for record in raw_records if is_pair_record(record) and record.get("label") in {0, 1}]
     if len(records) < 8:
         raise ValueError(f"Need at least 8 labeled pair records, got {len(records)}.")
     labels = np.asarray([int(record["label"]) for record in records], dtype=np.int64)
 
-    train_records, test_records, y_train, y_test = train_test_split(
-        records,
-        labels,
-        test_size=0.35,
-        random_state=42,
-        stratify=labels if len(set(labels.tolist())) > 1 else None,
-    )
+    print(f"[2/8] Building grouped train/test split from {len(records)} pair records")
+    train_records, test_records, y_train, y_test = grouped_train_test_split(records, labels)
 
+    print("[3/8] Fitting shared TF-IDF vocabulary")
     vectorizer = TfidfVectorizer(
         token_pattern=r"(?u)\b\w\w+\b",
         ngram_range=(1, 2),
@@ -289,6 +363,7 @@ def train(input_path: Path, output_dir: Path, epochs: int = 80) -> dict[str, Any
     )
     vectorizer.fit([query_text(record) for record in train_records] + [poi_text(record) for record in train_records])
 
+    print(f"[4/8] Building torch datasets: train={len(train_records)} test={len(test_records)}")
     train_dataset = TwoTowerDataset(train_records, y_train, vectorizer)
     test_dataset = TwoTowerDataset(test_records, y_test, vectorizer)
     loader = torch.utils.data.DataLoader(train_dataset, batch_size=8, shuffle=True)
@@ -300,17 +375,31 @@ def train(input_path: Path, output_dir: Path, epochs: int = 80) -> dict[str, Any
 
     history: list[float] = []
     model.train()
-    for _ in range(epochs):
+    print(f"[5/8] Training two-tower representation for {epochs} epochs")
+    for epoch in range(epochs):
         losses: list[float] = []
-        for query, poi, numeric, label in loader:
+        for query, poi, numeric, label, supcon_label in loader:
             optimizer.zero_grad()
-            logits = model(query, poi, numeric)
-            loss = criterion(logits, label)
+            query_emb, poi_emb = model.encode(query, poi, numeric)
+            temperature = model.temperature.clamp(0.03, 0.5)
+            logits = (query_emb * poi_emb).sum(dim=1) / temperature
+            relevance_loss = criterion(logits, label)
+            positive_mask = label > 0.5
+            if positive_mask.any():
+                contrastive_features = torch.cat([query_emb[positive_mask], poi_emb[positive_mask]], dim=0)
+                contrastive_labels = torch.cat([supcon_label[positive_mask], supcon_label[positive_mask]], dim=0)
+                contrastive_loss = supervised_contrastive_loss(contrastive_features, contrastive_labels)
+            else:
+                contrastive_loss = torch.zeros((), device=label.device)
+            loss = relevance_loss + 0.08 * contrastive_loss
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
         history.append(float(np.mean(losses)))
+        if epoch == 0 or (epoch + 1) % 10 == 0 or epoch + 1 == epochs:
+            print(f"  epoch {epoch + 1:03d}/{epochs} loss={history[-1]:.6f}")
 
+    print("[6/8] Evaluating grouped holdout metrics")
     train_scores = predict_scores(model, train_dataset)
     test_scores = predict_scores(model, test_dataset)
     metrics = {
@@ -329,11 +418,14 @@ def train(input_path: Path, output_dir: Path, epochs: int = 80) -> dict[str, Any
             "type": "tfidf_two_tower_pytorch",
             "embedding_dim": 96,
             "epochs": epochs,
+            "loss": "bce_relevance_plus_supervised_contrastive",
+            "split": "grouped_by_sample_or_query",
             "purpose": "first neural representation baseline for agent POI matching",
         },
         "history": {"train_loss": history},
     }
 
+    print(f"[7/8] Saving checkpoint to {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -343,6 +435,7 @@ def train(input_path: Path, output_dir: Path, epochs: int = 80) -> dict[str, Any
         },
         output_dir / "agent_two_tower_representation.pt",
     )
+    print("[8/8] Writing metrics and training figure")
     (output_dir / "two_tower_metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     plot_training(history, metrics, output_dir)
     return metrics

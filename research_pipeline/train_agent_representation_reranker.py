@@ -24,7 +24,6 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
-from sklearn.model_selection import train_test_split
 from sklearn.pipeline import FeatureUnion
 from sklearn.preprocessing import FunctionTransformer
 
@@ -148,6 +147,45 @@ def evaluate(records: list[dict[str, Any]], labels: np.ndarray, scores: np.ndarr
     return metrics
 
 
+def group_key(record: dict[str, Any]) -> str:
+    return str(record.get("sample_id") or record.get("persona_id") or record.get("query") or "unknown")
+
+
+def grouped_train_test_split(
+    records: list[dict[str, Any]],
+    labels: np.ndarray,
+    test_size: float = 0.35,
+    seed: int = 42,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], np.ndarray, np.ndarray]:
+    groups: dict[str, list[int]] = defaultdict(list)
+    for index, record in enumerate(records):
+        groups[group_key(record)].append(index)
+
+    rng = np.random.default_rng(seed)
+    group_names = np.asarray(sorted(groups))
+    rng.shuffle(group_names)
+
+    target_test_records = max(1, int(len(records) * test_size))
+    test_indices: list[int] = []
+    train_indices: list[int] = []
+    for name in group_names:
+      bucket = groups[str(name)]
+      if len(test_indices) < target_test_records:
+          test_indices.extend(bucket)
+      else:
+          train_indices.extend(bucket)
+
+    if not train_indices or not test_indices:
+        raise ValueError("Grouped split failed; need more synthetic groups.")
+
+    return (
+        [records[index] for index in train_indices],
+        [records[index] for index in test_indices],
+        labels[train_indices],
+        labels[test_indices],
+    )
+
+
 def plot_metrics(metrics: dict[str, Any], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     keys = ["roc_auc", "average_precision", "recall_at_5", "precision_at_5", "mrr"]
@@ -200,27 +238,26 @@ def plot_metrics(metrics: dict[str, Any], output_dir: Path) -> None:
 
 
 def train(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    print(f"[1/6] Reading grounded training pairs from {input_path}")
     raw_records = read_jsonl(input_path)
     records = [record for record in raw_records if is_pair_record(record) and record.get("label") in {0, 1}]
     if len(records) < 8:
         raise ValueError(f"Need at least 8 labeled pair records, got {len(records)}.")
 
     labels = np.asarray([int(record["label"]) for record in records], dtype=np.int64)
-    train_records, test_records, y_train, y_test = train_test_split(
-        records,
-        labels,
-        test_size=0.35,
-        random_state=42,
-        stratify=labels if len(set(labels.tolist())) > 1 else None,
-    )
+    print(f"[2/6] Building grouped train/test split from {len(records)} pair records")
+    train_records, test_records, y_train, y_test = grouped_train_test_split(records, labels)
 
+    print(f"[3/6] Fitting TF-IDF + numeric feature union")
     feature_union = make_feature_union(train_records)
     x_train = feature_union.fit_transform(train_records)
     x_test = feature_union.transform(test_records)
 
+    print(f"[4/6] Training logistic reranker: train={len(train_records)} test={len(test_records)}")
     model = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42)
     model.fit(x_train, y_train)
 
+    print("[5/6] Evaluating grouped holdout metrics")
     train_scores = model.predict_proba(x_train)[:, 1]
     test_scores = model.predict_proba(x_test)[:, 1]
 
@@ -239,9 +276,11 @@ def train(input_path: Path, output_dir: Path) -> dict[str, Any]:
         "model": {
             "type": "tfidf_numeric_logistic_regression",
             "purpose": "research baseline before PyTorch contrastive fine-tuning",
+            "split": "grouped_by_sample_or_query",
         },
     }
 
+    print(f"[6/6] Writing metrics and figure to {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "agent_representation_metrics.json").write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2),
